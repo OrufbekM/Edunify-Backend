@@ -1,13 +1,15 @@
 {
   "name": "edunify-backend",
   "version": "1.0.0",
-  "main": "src/index.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node dist/server.js",
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [],
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "^1.5.0",
     "argon2": "^0.45.2",
@@ -33,10 +35,9 @@
     "@types/node": "^26.6.6",
     "@types/supertest": "^7.2.1",
     "eslint": "^10.14.0",
-    "nodemon": "^3.1.14",
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",
-    "typescript": "^6.0.3",
+    "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.1.0"
   }
