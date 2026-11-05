@@ -1,17 +1,30 @@
-require('dotenv').config();
+process.loadEnvFile();
+
 const express = require('express');
-const cors = require('cors');
+const sequelize = require('./db');
 
 const app = express();
 
-app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.json({ message: 'EdunifyBackend ishlayapti' });
+app.get('/api/v1/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`EdunifyBackend running on http://localhost:${PORT}`);
-})
+
+async function start() {
+  try {
+    await sequelize.authenticate();
+    console.log('PostgreSQL ulandi');
+
+    app.listen(PORT, () => {
+      console.log(`EdunifyBackend running on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("Bazaga ulanib bo'lmadi:", err.message);
+    process.exit(1);
+  }
+}
+
+start();
