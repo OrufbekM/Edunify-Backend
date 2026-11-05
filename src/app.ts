@@ -8,13 +8,11 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 
 export const app = express();
 
-// Contract section 2.1: no ETags.
 app.disable('etag');
 
 app.use(
   pinoHttp({
     logger,
-    // pino-http logs every response at `info` by default, even a 500.
     customLogLevel: (_req, res) => (res.statusCode >= 500 ? 'error' : 'info'),
   }),
 );
