@@ -19,6 +19,28 @@ export function signFileUrl(fileId: string, now = new Date()): { url: string; ex
   };
 }
 
+export interface FileRef {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  url: string;
+  expiresAt: string;
+}
+
+export function toFileRef(
+  file: { id: string; originalName: string; mime: string; size: number },
+  now = new Date(),
+): FileRef {
+  return {
+    id: file.id,
+    name: file.originalName,
+    mime: file.mime,
+    size: file.size,
+    ...signFileUrl(file.id, now),
+  };
+}
+
 // exp and sig come straight from the query string, so either can be missing or an array.
 export function isValidFileSignature(
   fileId: string,

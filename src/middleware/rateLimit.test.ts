@@ -18,7 +18,7 @@ import {
 const fakeAuth: RequestHandler = (req, _res, next) => {
   const userId = req.get('x-test-user');
   if (userId) {
-    req.auth = { userId, role: 'teacher' };
+    req.user = { id: userId, role: 'teacher' };
   }
   next();
 };

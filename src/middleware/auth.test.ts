@@ -15,7 +15,7 @@ const user = { id: randomUUID(), role: 'student' } as const;
 function createApp() {
   const app = express();
   app.get('/private', requireAuth, (req, res) => {
-    res.json(req.auth);
+    res.json(req.user);
   });
   app.get('/unguarded', (req, res) => {
     res.json(getAuth(req));
@@ -71,11 +71,11 @@ describe('requireAuth', () => {
     expect(res.body.error.code).toBe('TOKEN_EXPIRED');
   });
 
-  it('sets req.auth from a valid token', async () => {
+  it('sets req.user from a valid token', async () => {
     const res = await withAuthorization(`Bearer ${signAccessToken(user)}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ userId: user.id, role: user.role });
+    expect(res.body).toEqual({ id: user.id, role: user.role });
   });
 
   it.each(['bearer', 'BEARER', 'BeArEr'])('accepts the scheme spelled %s', async (scheme) => {

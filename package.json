@@ -12,7 +12,8 @@
     "migrate:reset": "tsx --env-file=.env src/db/migrate.ts reset",
     "migrate:status": "tsx --env-file=.env src/db/migrate.ts status",
     "migrate:prod": "node dist/db/migrate.js up",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint ."
   },
   "keywords": [],
   "type": "module",
@@ -46,5 +47,8 @@
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=24 <25"
   }
 }

@@ -1,5 +1,7 @@
 import { randomInt } from 'node:crypto';
 
+import type { UniqueConstraintError } from 'sequelize';
+
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const LENGTH = 8;
 const PATTERN = /^[a-z0-9]{8}$/;
@@ -20,16 +22,26 @@ export function isValidPublicId(value: string): boolean {
   return PATTERN.test(value);
 }
 
-export async function generateUniquePublicId(
-  isTaken: (candidate: string) => boolean | Promise<boolean>,
-  maxAttempts = 5,
-): Promise<string> {
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const candidate = generatePublicId();
-    if (!(await isTaken(candidate))) {
-      return candidate;
+function isPublicIdCollision(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    err.name === 'SequelizeUniqueConstraintError' &&
+    'public_id' in (err as UniqueConstraintError).fields
+  );
+}
+
+// A failed insert aborts its transaction, so `insert` must open its own on every call.
+export async function insertWithPublicId<T>(
+  insert: (publicId: string) => Promise<T>,
+  maxRetries = 5,
+): Promise<T> {
+  for (let retries = 0; ; retries += 1) {
+    try {
+      return await insert(generatePublicId());
+    } catch (err) {
+      if (retries === maxRetries || !isPublicIdCollision(err)) {
+        throw err;
+      }
     }
   }
-
-  throw new Error(`No free public ID after ${maxAttempts} attempts`);
 }

@@ -44,7 +44,7 @@ function ipKey(req: Request): string {
 }
 
 function userOrIpKey(req: Request): string {
-  return req.auth?.userId ?? ipKey(req);
+  return req.user?.id ?? ipKey(req);
 }
 
 function loginKey(req: Request): string {

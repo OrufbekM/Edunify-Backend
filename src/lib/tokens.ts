@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { env } from '../config/env.js';
 import { ROLES, type Role } from '../db/models/enums.js';
 import { AppError } from './errors.js';
-import { uuidSchema } from './zod.js';
+import { uuidSchema } from './validation.js';
 
 export const ACCESS_TOKEN_TTL_SECONDS = 900;
 export const REFRESH_TOKEN_TTL_SECONDS = 2_592_000;

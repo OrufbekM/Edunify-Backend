@@ -9,6 +9,7 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 export const app = express();
 
 app.disable('etag');
+app.set('trust proxy', 1);
 
 app.use(
   pinoHttp({

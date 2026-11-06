@@ -1,8 +1,9 @@
+import { UniqueConstraintError } from 'sequelize';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   generatePublicId,
-  generateUniquePublicId,
+  insertWithPublicId,
   isValidPublicId,
   normalizePublicId,
 } from './publicId.js';
@@ -45,46 +46,67 @@ describe('isValidPublicId', () => {
   );
 });
 
-describe('generateUniquePublicId', () => {
-  it('returns the first free candidate', async () => {
-    const isTaken = vi.fn().mockResolvedValue(false);
+describe('insertWithPublicId', () => {
+  const collision = () => new UniqueConstraintError({ fields: { public_id: 'ab12cd34' } });
 
-    await expect(generateUniquePublicId(isTaken)).resolves.toMatch(/^[a-z0-9]{8}$/);
-    expect(isTaken).toHaveBeenCalledTimes(1);
+  it('hands the insert a generated ID and returns its result', async () => {
+    const insert = vi.fn(async (publicId: string) => ({ publicId }));
+
+    const row = await insertWithPublicId(insert);
+
+    expect(row.publicId).toMatch(/^[a-z0-9]{8}$/);
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 
-  it('retries with a new candidate until one is free', async () => {
-    const isTaken = vi
-      .fn<(candidate: string) => Promise<boolean>>()
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValue(false);
+  it('retries with a new ID after a collision', async () => {
+    const insert = vi
+      .fn<(publicId: string) => Promise<string>>()
+      .mockRejectedValueOnce(collision())
+      .mockResolvedValue('inserted');
 
-    const id = await generateUniquePublicId(isTaken);
+    await expect(insertWithPublicId(insert)).resolves.toBe('inserted');
 
-    expect(isTaken).toHaveBeenCalledTimes(5);
-    expect(isTaken).toHaveBeenLastCalledWith(id);
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(insert.mock.calls[0]?.[0]).not.toBe(insert.mock.calls[1]?.[0]);
   });
 
-  it('throws after 5 taken candidates', async () => {
-    const isTaken = vi.fn().mockResolvedValue(true);
+  it('succeeds on the fifth retry', async () => {
+    const insert = vi.fn<(publicId: string) => Promise<string>>();
+    for (let i = 0; i < 5; i += 1) {
+      insert.mockRejectedValueOnce(collision());
+    }
+    insert.mockResolvedValue('inserted');
 
-    await expect(generateUniquePublicId(isTaken)).rejects.toThrow('No free public ID');
-    expect(isTaken).toHaveBeenCalledTimes(5);
+    await expect(insertWithPublicId(insert)).resolves.toBe('inserted');
+    expect(insert).toHaveBeenCalledTimes(6);
   });
 
-  it('honours a custom attempt limit and a synchronous check', async () => {
-    const isTaken = vi.fn().mockReturnValue(true);
+  it('gives up after 5 retries with the collision itself', async () => {
+    const insert = vi.fn().mockRejectedValue(collision());
 
-    await expect(generateUniquePublicId(isTaken, 2)).rejects.toThrow('after 2 attempts');
-    expect(isTaken).toHaveBeenCalledTimes(2);
+    await expect(insertWithPublicId(insert)).rejects.toBeInstanceOf(UniqueConstraintError);
+    expect(insert).toHaveBeenCalledTimes(6);
   });
 
-  it('lets a failing check propagate', async () => {
-    const isTaken = vi.fn().mockRejectedValue(new Error('database down'));
+  it('honours a custom retry limit', async () => {
+    const insert = vi.fn().mockRejectedValue(collision());
 
-    await expect(generateUniquePublicId(isTaken)).rejects.toThrow('database down');
+    await expect(insertWithPublicId(insert, 2)).rejects.toBeInstanceOf(UniqueConstraintError);
+    expect(insert).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a collision on another column', async () => {
+    const taken = new UniqueConstraintError({ fields: { email: 'a@b.co' } });
+    const insert = vi.fn().mockRejectedValue(taken);
+
+    await expect(insertWithPublicId(insert)).rejects.toBe(taken);
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry any other error', async () => {
+    const insert = vi.fn().mockRejectedValue(new Error('database down'));
+
+    await expect(insertWithPublicId(insert)).rejects.toThrow('database down');
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,6 +8,7 @@ import {
   assertValidFileSignature,
   isValidFileSignature,
   signFileUrl,
+  toFileRef,
 } from './signedUrl.js';
 
 const fileId = randomUUID();
@@ -39,6 +40,36 @@ describe('signFileUrl', () => {
 
   it('mirrors exp in expiresAt as an ISO string with milliseconds', () => {
     expect(signFileUrl(fileId, now).expiresAt).toBe('2026-11-05T07:23:09.000Z');
+  });
+});
+
+describe('toFileRef', () => {
+  const file = { id: fileId, originalName: 'notes.md', mime: 'text/markdown', size: 42 };
+
+  it('builds the contract FileRef with a signed url', () => {
+    expect(toFileRef(file, now)).toEqual({
+      id: fileId,
+      name: 'notes.md',
+      mime: 'text/markdown',
+      size: 42,
+      ...signFileUrl(fileId, now),
+    });
+  });
+
+  it('never carries other fields of the row', () => {
+    const row = { ...file, storageKey: 'ab/secret', ownerUserId: randomUUID() };
+
+    expect(Object.keys(toFileRef(row, now)).sort()).toEqual(
+      ['expiresAt', 'id', 'mime', 'name', 'size', 'url'].sort(),
+    );
+  });
+
+  it('produces a url that passes verification', () => {
+    const { searchParams } = new URL(toFileRef(file, now).url, 'http://localhost');
+
+    expect(
+      isValidFileSignature(fileId, searchParams.get('exp'), searchParams.get('sig'), now),
+    ).toBe(true);
   });
 });
 

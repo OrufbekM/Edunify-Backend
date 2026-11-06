@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
-import { idParamsSchema, publicIdSchema, trimmedString, uuidSchema } from './zod.js';
+import {
+  idParamsSchema,
+  optionalText,
+  publicIdSchema,
+  trimmedString,
+  uuidSchema,
+} from './validation.js';
 
 describe('trimmedString', () => {
   it('trims before checking the length', () => {
@@ -19,6 +26,35 @@ describe('trimmedString', () => {
 
   it('rejects a value over the maximum', () => {
     expect(trimmedString(1, 3).safeParse('abcd').success).toBe(false);
+  });
+});
+
+describe('optionalText', () => {
+  const body = z.strictObject({ name: optionalText(5) });
+
+  it('trims a value', () => {
+    expect(body.parse({ name: '  abc  ' })).toEqual({ name: 'abc' });
+  });
+
+  it.each(['', '   ', '\n\t'])('turns the empty value %j into null', (name) => {
+    expect(body.parse({ name })).toEqual({ name: null });
+  });
+
+  it('keeps an explicit null', () => {
+    expect(body.parse({ name: null })).toEqual({ name: null });
+  });
+
+  it('leaves an absent key absent', () => {
+    expect(body.parse({})).toEqual({});
+  });
+
+  it('checks the length after trimming', () => {
+    expect(body.parse({ name: '  abcde  ' })).toEqual({ name: 'abcde' });
+    expect(body.safeParse({ name: 'abcdef' }).success).toBe(false);
+  });
+
+  it('rejects a value that is not a string', () => {
+    expect(body.safeParse({ name: 5 }).success).toBe(false);
   });
 });
 

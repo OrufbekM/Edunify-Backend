@@ -32,7 +32,7 @@ function get(path: string, role: Role) {
 }
 
 describe('requireRole', () => {
-  it('gives 401 UNAUTHENTICATED without req.auth', async () => {
+  it('gives 401 UNAUTHENTICATED without req.user', async () => {
     const res = await request(createApp()).get('/no-auth-first');
 
     expect(res.status).toBe(401);

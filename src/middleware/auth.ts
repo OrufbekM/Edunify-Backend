@@ -5,13 +5,13 @@ import { AppError } from '../lib/errors.js';
 import { verifyAccessToken } from '../lib/tokens.js';
 
 export interface AuthContext {
-  userId: string;
+  id: string;
   role: Role;
 }
 
 declare module 'express-serve-static-core' {
   interface Request {
-    auth?: AuthContext;
+    user?: AuthContext;
   }
 }
 
@@ -24,14 +24,16 @@ export const requireAuth: RequestHandler = (req, _res, next) => {
     throw new AppError('UNAUTHENTICATED', 'Missing or malformed Authorization header');
   }
 
-  req.auth = verifyAccessToken(token);
+  const { userId, role } = verifyAccessToken(token);
+
+  req.user = { id: userId, role };
   next();
 };
 
 export function getAuth(req: Request): AuthContext {
-  if (!req.auth) {
+  if (!req.user) {
     throw new AppError('UNAUTHENTICATED', 'Authentication required');
   }
 
-  return req.auth;
+  return req.user;
 }
