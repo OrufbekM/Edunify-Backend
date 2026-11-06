@@ -13,10 +13,14 @@ function toAppError(err: unknown): AppError {
   }
 
   if (err instanceof ZodError) {
-    const details = err.issues.map((issue) => ({
-      path: issue.path.join('.'),
-      message: issue.message,
-    }));
+    const details = err.issues.flatMap((issue) =>
+      issue.code === 'unrecognized_keys'
+        ? issue.keys.map((key) => ({
+            path: [...issue.path, key].join('.'),
+            message: 'Unknown field',
+          }))
+        : [{ path: issue.path.join('.'), message: issue.message }],
+    );
     return new AppError('VALIDATION_ERROR', 'Invalid request', details);
   }
 

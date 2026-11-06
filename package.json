@@ -5,13 +5,14 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "tsx watch --env-file=.env src/server.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx --env-file=.env src/db/migrate.ts up",
     "migrate:down": "tsx --env-file=.env src/db/migrate.ts down",
     "migrate:reset": "tsx --env-file=.env src/db/migrate.ts reset",
     "migrate:status": "tsx --env-file=.env src/db/migrate.ts status",
-    "migrate:prod": "node dist/db/migrate.js up"
+    "migrate:prod": "node dist/db/migrate.js up",
+    "test": "vitest run"
   },
   "keywords": [],
   "type": "module",

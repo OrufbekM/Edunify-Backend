@@ -2,12 +2,21 @@ import { app } from './app.js';
 import { env } from './config/env.js';
 import { sequelize } from './db/index.js';
 import { logger } from './lib/logger.js';
+import { initStorage } from './storage/index.js';
 
 try {
   await sequelize.authenticate();
   logger.info('PostgreSQL connection has been established successfully.');
 } catch (err) {
   logger.fatal({ err }, 'Could not connect to PostgreSQL');
+  process.exit(1);
+}
+
+try {
+  await initStorage();
+  logger.info(`Storage directory is ready: ${env.STORAGE_DIR}`);
+} catch (err) {
+  logger.fatal({ err }, 'Could not prepare the storage directory');
   process.exit(1);
 }
 
