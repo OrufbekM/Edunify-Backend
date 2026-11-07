@@ -2,6 +2,7 @@ import type { Request } from 'express';
 import {
   HOUR,
   MINUTE,
+  MemoryStore,
   ipKeyGenerator,
   rateLimit,
   type AugmentedRequest,
@@ -11,6 +12,13 @@ import {
 import { AppError } from '../lib/errors.js';
 
 const MAX_EMAIL_LENGTH = 254;
+
+const stores: MemoryStore[] = [];
+
+// For tests only: clears the counters of every limiter created here.
+export async function resetRateLimits(): Promise<void> {
+  await Promise.all(stores.map((store) => store.resetAll()));
+}
 
 interface RateLimiterOptions {
   windowMs: number;
@@ -23,10 +31,14 @@ export function createRateLimiter({
   limit,
   keyGenerator,
 }: RateLimiterOptions): RateLimitRequestHandler {
+  const store = new MemoryStore();
+  stores.push(store);
+
   return rateLimit({
     windowMs,
     limit,
     keyGenerator,
+    store,
     standardHeaders: false,
     legacyHeaders: false,
     handler: (req, res, next) => {
