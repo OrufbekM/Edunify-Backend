@@ -6,6 +6,8 @@ import { pinoHttp } from 'pino-http';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
+import { categoriesRouter } from './modules/categories/routes.js';
+import { classesRouter } from './modules/classes/routes.js';
 
 export const app = express();
 
@@ -28,6 +30,8 @@ app.get('/api/v1/health', (_req, res) => {
 
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/me', meRouter);
+app.use('/api/v1/categories', categoriesRouter);
+app.use('/api/v1/classes', classesRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

@@ -25,6 +25,9 @@ export const uuidSchema = z.uuid();
 
 export const idParamsSchema = z.strictObject({ id: uuidSchema });
 
+// For GET routes that take no query parameters: unknown ones are rejected too.
+export const emptyQuerySchema = z.strictObject({});
+
 export const publicIdSchema = z
   .string()
   .overwrite(normalizePublicId)
