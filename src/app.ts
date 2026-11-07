@@ -8,6 +8,7 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
 import { classesRouter } from './modules/classes/routes.js';
+import { lessonsRouter } from './modules/lessons/routes.js';
 import { classStudentsRouter, studentRouter } from './modules/students/routes.js';
 
 export const app = express();
@@ -32,8 +33,10 @@ app.get('/api/v1/health', (_req, res) => {
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/me', meRouter);
 app.use('/api/v1/categories', categoriesRouter);
-// Before classesRouter, whose guards would otherwise run first on these paths too.
+// Both before classesRouter, whose teacher-only guards would otherwise run first on these
+// paths too (students may read a class outline).
 app.use('/api/v1/classes/:classId/students', classStudentsRouter);
+app.use('/api/v1', lessonsRouter);
 app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
 
