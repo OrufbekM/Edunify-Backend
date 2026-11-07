@@ -12,19 +12,23 @@ export interface TestUser {
   id: string;
   role: Role;
   token: string;
+  publicId: string | null;
 }
 
 // Writes the account straight to the database, skipping argon2 and the register rate limit.
-export async function createTestUser(role: Role): Promise<TestUser> {
+export async function createTestUser(
+  role: Role,
+  fullName = `Test ${role}`,
+): Promise<TestUser> {
   const user = await User.create({
     role,
-    fullName: `Test ${role}`,
+    fullName,
     email: `${randomUUID()}@example.com`,
     passwordHash: 'not-a-real-hash',
     publicId: role === 'student' ? generatePublicId() : null,
   });
 
-  return { id: user.id, role, token: signAccessToken(user) };
+  return { id: user.id, role, token: signAccessToken(user), publicId: user.publicId };
 }
 
 // Requests to the real app as `user`; with no user, requests go out unauthenticated.

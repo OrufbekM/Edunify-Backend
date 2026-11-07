@@ -1,4 +1,4 @@
-import type { Transaction } from 'sequelize';
+import { Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
 import { Category, ClassStudent, SchoolClass } from '../../db/models/index.js';
@@ -37,6 +37,26 @@ export async function getOwnClass(
   transaction?: Transaction,
 ): Promise<SchoolClass> {
   const schoolClass = await SchoolClass.findOne({ where: { id: classId, teacherId }, transaction });
+
+  if (!schoolClass) {
+    throw new AppError('NOT_FOUND', 'Class not found');
+  }
+
+  return schoolClass;
+}
+
+// Serializes cap checks per class, the way lockTeacher does per teacher. NO KEY UPDATE,
+// so rows referencing the class can still be inserted elsewhere while it is held.
+export async function lockOwnClass(
+  teacherId: string,
+  classId: string,
+  transaction: Transaction,
+): Promise<SchoolClass> {
+  const schoolClass = await SchoolClass.findOne({
+    where: { id: classId, teacherId },
+    lock: Transaction.LOCK.NO_KEY_UPDATE,
+    transaction,
+  });
 
   if (!schoolClass) {
     throw new AppError('NOT_FOUND', 'Class not found');
