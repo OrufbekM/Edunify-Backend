@@ -4,6 +4,7 @@ import { sequelize } from '../../db/index.js';
 import { ClassClaim, ClassStudent, LinkAudit, SchoolClass, User } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
 import { getOwnClass, lockOwnClass } from '../classes/service.js';
+import { deleteFileRows, pageFileIds, removeStoredFiles } from '../files/service.js';
 
 const STUDENT_CAP = 200;
 
@@ -188,18 +189,36 @@ export async function updateStudent(
   }
 }
 
-// The database cascades the row's submissions, grades and audit rows. Removing their
-// stored files arrives in Phase 7.
+// The database cascades the row's submissions, grades and audit rows; their files go once
+// the transaction has committed.
 export async function deleteStudent(
   teacherId: string,
   classId: string,
   studentId: string,
 ): Promise<void> {
-  await getOwnClass(teacherId, classId);
+  const storageKeys = await sequelize.transaction(async (transaction) => {
+    await getOwnClass(teacherId, classId, transaction);
 
-  if ((await ClassStudent.destroy({ where: { id: studentId, classId } })) === 0) {
-    throw new AppError('NOT_FOUND', 'Class student not found');
-  }
+    // FOR UPDATE: a new submission's foreign key needs KEY SHARE on this row, so none can
+    // appear while its pages are collected.
+    const row = await ClassStudent.findOne({
+      where: { id: studentId, classId },
+      lock: Transaction.LOCK.UPDATE,
+      transaction,
+    });
+
+    if (!row) {
+      throw new AppError('NOT_FOUND', 'Class student not found');
+    }
+
+    const fileIds = await pageFileIds({ classStudentId: row.id }, transaction);
+
+    await row.destroy({ transaction });
+
+    return deleteFileRows(fileIds, transaction);
+  });
+
+  await removeStoredFiles(storageKeys);
 }
 
 // The same answer for every existing class, whether or not the teacher has linked the

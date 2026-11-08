@@ -8,6 +8,7 @@ import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
 import { classesRouter } from './modules/classes/routes.js';
+import { filesRouter } from './modules/files/routes.js';
 import { lessonsRouter } from './modules/lessons/routes.js';
 import { classStudentsRouter, studentRouter } from './modules/students/routes.js';
 
@@ -39,6 +40,7 @@ app.use('/api/v1/classes/:classId/students', classStudentsRouter);
 app.use('/api/v1', lessonsRouter);
 app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
+app.use('/api/v1/files', filesRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

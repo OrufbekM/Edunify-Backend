@@ -5,6 +5,7 @@ import { Category, ClassStudent, SchoolClass } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
 import { insertWithPublicId } from '../../lib/publicId.js';
 import { lockTeacher } from '../categories/service.js';
+import { deleteFileRows, lockLessonFiles, removeStoredFiles } from '../files/service.js';
 
 const CLASS_CAP = 100;
 
@@ -175,7 +176,17 @@ export async function updateClass(
   return toClassDto(schoolClass, await studentCount(classId));
 }
 
-// The database cascades everything in the class. Removing its stored files arrives in Phase 7.
+// The database cascades everything in the class; its files go once the transaction has
+// committed. The class lock keeps new lessons out while the files are collected.
 export async function deleteClass(teacherId: string, classId: string): Promise<void> {
-  await (await getOwnClass(teacherId, classId)).destroy();
+  const storageKeys = await sequelize.transaction(async (transaction) => {
+    const schoolClass = await lockOwnClass(teacherId, classId, transaction);
+    const fileIds = await lockLessonFiles({ classId }, transaction);
+
+    await schoolClass.destroy({ transaction });
+
+    return deleteFileRows(fileIds, transaction);
+  });
+
+  await removeStoredFiles(storageKeys);
 }

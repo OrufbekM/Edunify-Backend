@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-import { trimmedString, uuidSchema } from '../../lib/validation.js';
+import { HOMEWORK_TYPES } from '../../db/models/enums.js';
+import { optionalText, trimmedString, uuidSchema } from '../../lib/validation.js';
 
 const title = trimmedString(1, 120);
 
@@ -26,4 +27,10 @@ export const updateLessonBody = z.strictObject({
   title: title.optional(),
   unitId: unitId.optional(),
   order: order.optional(),
+});
+
+// Empty after trimming, or absent, means no instructions text (contract 2.6, plan open item 6).
+export const putHomeworkBody = z.strictObject({
+  type: z.enum(HOMEWORK_TYPES),
+  instructionsText: optionalText(10_000),
 });

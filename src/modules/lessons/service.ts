@@ -2,10 +2,26 @@ import { QueryTypes, Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
 import type { HomeworkType, Role } from '../../db/models/enums.js';
-import { Lesson, SchoolClass, Unit } from '../../db/models/index.js';
+import {
+  FileRecord,
+  Homework,
+  Lesson,
+  SchoolClass,
+  Submission,
+  Unit,
+} from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
-import type { FileRef } from '../../lib/signedUrl.js';
+import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
+import type { Upload } from '../../middleware/upload.js';
 import { getOwnClass, lockOwnClass } from '../classes/service.js';
+import {
+  createFileRecord,
+  deleteFileRows,
+  lockLessonFiles,
+  pageFileIds,
+  removeStoredFiles,
+  withStoredFile,
+} from '../files/service.js';
 import { getActiveClassStudent } from '../students/service.js';
 
 const UNIT_CAP = 100;
@@ -31,6 +47,14 @@ export interface LessonSummaryDto {
   homeworkType: HomeworkType | null;
 }
 
+export interface HomeworkDto {
+  id: string;
+  lessonId: string;
+  type: HomeworkType;
+  instructionsText: string | null;
+  instructionsFile: FileRef | null;
+}
+
 export interface LessonDetailDto {
   id: string;
   classId: string;
@@ -38,7 +62,7 @@ export interface LessonDetailDto {
   title: string;
   order: number;
   lessonFile: FileRef | null;
-  homework: null;
+  homework: HomeworkDto | null;
   mySubmission?: null;
 }
 
@@ -51,17 +75,40 @@ function toUnitDto(unit: Unit): UnitDto {
   return { id: unit.id, classId: unit.classId, title: unit.title, order: unit.position };
 }
 
-// lessonFile and homework arrive with Phase 7, a student's mySubmission with Phase 8.
-// Teacher responses carry no mySubmission key at all (contract 3).
-function toLessonDetail(lesson: Lesson, role: Role): LessonDetailDto {
+// File URLs are signed afresh on every read (contract 7). A student's mySubmission arrives
+// with Phase 8; teacher responses carry no mySubmission key at all (contract 3).
+async function lessonDetail(
+  lesson: Lesson,
+  role: Role,
+  transaction?: Transaction,
+): Promise<LessonDetailDto> {
+  const homework = await Homework.findOne({ where: { lessonId: lesson.id }, transaction });
+  const fileIds = [lesson.lessonFileId, homework?.instructionsFileId ?? null].filter(
+    (id): id is string => id !== null,
+  );
+  const files =
+    fileIds.length === 0 ? [] : await FileRecord.findAll({ where: { id: fileIds }, transaction });
+  const fileRef = (id: string | null): FileRef | null => {
+    const file = files.find((candidate) => candidate.id === id);
+    return file ? toFileRef(file) : null;
+  };
+
   const detail: LessonDetailDto = {
     id: lesson.id,
     classId: lesson.classId,
     unitId: lesson.unitId,
     title: lesson.title,
     order: lesson.position,
-    lessonFile: null,
-    homework: null,
+    lessonFile: fileRef(lesson.lessonFileId),
+    homework: homework
+      ? {
+          id: homework.id,
+          lessonId: homework.lessonId,
+          type: homework.type,
+          instructionsText: homework.instructionsText,
+          instructionsFile: fileRef(homework.instructionsFileId),
+        }
+      : null,
   };
 
   return role === 'student' ? { ...detail, mySubmission: null } : detail;
@@ -327,15 +374,20 @@ export async function updateUnit(
   });
 }
 
-// Cascades the unit's lessons with their homework and submissions. Removing their stored
-// files arrives in Phase 7.
+// Cascades the unit's lessons with their homework and submissions; their files go once the
+// transaction has committed.
 export async function deleteUnit(teacherId: string, unitId: string): Promise<void> {
-  await sequelize.transaction(async (transaction) => {
+  const storageKeys = await sequelize.transaction(async (transaction) => {
     const unit = await lockOwnUnit(teacherId, unitId, transaction);
+    const fileIds = await lockLessonFiles({ unitId }, transaction);
 
     await unit.destroy({ transaction });
     await writePositions('units', await unitIds(unit.classId, transaction), transaction);
+
+    return deleteFileRows(fileIds, transaction);
   });
+
+  await removeStoredFiles(storageKeys);
 }
 
 export async function createLesson(
@@ -363,7 +415,7 @@ export async function createLesson(
       { transaction },
     );
 
-    return toLessonDetail(lesson, 'teacher');
+    return lessonDetail(lesson, 'teacher', transaction);
   });
 }
 
@@ -419,14 +471,15 @@ export async function updateLesson(
       await lesson.reload({ transaction });
     }
 
-    return toLessonDetail(lesson, 'teacher');
+    return lessonDetail(lesson, 'teacher', transaction);
   });
 }
 
-// Cascades homework and submissions. Removing their stored files arrives in Phase 7.
+// Cascades homework and submissions; the files go once the transaction has committed.
 export async function deleteLesson(teacherId: string, lessonId: string): Promise<void> {
-  await sequelize.transaction(async (transaction) => {
+  const storageKeys = await sequelize.transaction(async (transaction) => {
     const lesson = await lockOwnLesson(teacherId, lessonId, transaction);
+    const fileIds = await lockLessonFiles({ lessonId }, transaction);
 
     await lesson.destroy({ transaction });
     await writePositions(
@@ -434,12 +487,16 @@ export async function deleteLesson(teacherId: string, lessonId: string): Promise
       await lessonIds(lesson.classId, lesson.unitId, transaction),
       transaction,
     );
+
+    return deleteFileRows(fileIds, transaction);
   });
+
+  await removeStoredFiles(storageKeys);
 }
 
 export async function getLesson(viewer: Viewer, lessonId: string): Promise<LessonDetailDto> {
   if (viewer.role === 'teacher') {
-    return toLessonDetail(await findOwnLesson(viewer.id, lessonId), 'teacher');
+    return lessonDetail(await findOwnLesson(viewer.id, lessonId), 'teacher');
   }
 
   const lesson = await Lesson.findByPk(lessonId);
@@ -454,5 +511,234 @@ export async function getLesson(viewer: Viewer, lessonId: string): Promise<Lesso
     throw err instanceof AppError && err.code === 'NOT_FOUND' ? lessonNotFound() : err;
   }
 
-  return toLessonDetail(lesson, 'student');
+  return lessonDetail(lesson, 'student');
+}
+
+function homeworkNotFound(): AppError {
+  return new AppError('NOT_FOUND', 'Homework not found');
+}
+
+// For the routes to call before multer reads a body (see lessons/routes.ts).
+export async function assertOwnLesson(teacherId: string, lessonId: string): Promise<void> {
+  await findOwnLesson(teacherId, lessonId);
+}
+
+export async function assertOwnHomework(teacherId: string, lessonId: string): Promise<void> {
+  await findOwnLesson(teacherId, lessonId);
+
+  if ((await Homework.count({ where: { lessonId } })) === 0) {
+    throw homeworkNotFound();
+  }
+}
+
+// Every change to a lesson's file or homework holds this lock, so two at once can't both
+// replace the same old file (orphaning one new one) or both create the homework. Deletes
+// that collect the lesson's files lock it FOR UPDATE, which waits for this one.
+async function lockLessonRow(
+  teacherId: string,
+  lessonId: string,
+  transaction: Transaction,
+): Promise<Lesson> {
+  await findOwnLesson(teacherId, lessonId, transaction);
+
+  const lesson = await Lesson.findByPk(lessonId, {
+    lock: Transaction.LOCK.NO_KEY_UPDATE,
+    transaction,
+  });
+
+  if (!lesson) {
+    throw lessonNotFound();
+  }
+
+  return lesson;
+}
+
+// FOR UPDATE, because a new submission's foreign key needs KEY SHARE on the homework row:
+// while this is held, no submission can appear, so the count behind HOMEWORK_TYPE_LOCKED
+// and the files collected for a delete stay true until commit.
+async function lockHomework(
+  lessonId: string,
+  transaction: Transaction,
+): Promise<Homework | null> {
+  return Homework.findOne({ where: { lessonId }, lock: Transaction.LOCK.UPDATE, transaction });
+}
+
+async function requireHomework(lessonId: string, transaction: Transaction): Promise<Homework> {
+  const homework = await lockHomework(lessonId, transaction);
+
+  if (!homework) {
+    throw homeworkNotFound();
+  }
+
+  return homework;
+}
+
+// Replaces any earlier file, whose stored bytes go once the transaction has committed.
+export async function setLessonFile(
+  teacherId: string,
+  lessonId: string,
+  upload: Upload,
+): Promise<LessonDetailDto> {
+  const { detail, replacedKeys } = await withStoredFile(upload.data, (storageKey) =>
+    sequelize.transaction(async (transaction) => {
+      const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+      const file = await createFileRecord(teacherId, 'lesson', upload, storageKey, transaction);
+      const replacedId = lesson.lessonFileId;
+
+      lesson.lessonFileId = file.id;
+      await lesson.save({ transaction });
+
+      return {
+        replacedKeys: replacedId ? await deleteFileRows([replacedId], transaction) : [],
+        detail: await lessonDetail(lesson, 'teacher', transaction),
+      };
+    }),
+  );
+
+  await removeStoredFiles(replacedKeys);
+  return detail;
+}
+
+export async function removeLessonFile(
+  teacherId: string,
+  lessonId: string,
+): Promise<LessonDetailDto> {
+  const { detail, removedKeys } = await sequelize.transaction(async (transaction) => {
+    const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+    const fileId = lesson.lessonFileId;
+
+    if (!fileId) {
+      throw new AppError('NOT_FOUND', 'Lesson file not found');
+    }
+
+    lesson.lessonFileId = null;
+    await lesson.save({ transaction });
+
+    return {
+      removedKeys: await deleteFileRows([fileId], transaction),
+      detail: await lessonDetail(lesson, 'teacher', transaction),
+    };
+  });
+
+  await removeStoredFiles(removedKeys);
+  return detail;
+}
+
+// Creates or replaces (contract 2.1: PUT replaces), so an absent instructionsText clears
+// it. Only the instructions file carries over (contract 8.7).
+export async function putHomework(
+  teacherId: string,
+  lessonId: string,
+  input: { type: HomeworkType; instructionsText?: string | null },
+): Promise<LessonDetailDto> {
+  return sequelize.transaction(async (transaction) => {
+    const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+    const homework = await lockHomework(lessonId, transaction);
+    const instructionsText = input.instructionsText ?? null;
+
+    if (!homework) {
+      await Homework.create(
+        { lessonId, type: input.type, instructionsText, instructionsFileId: null },
+        { transaction },
+      );
+    } else {
+      // Any version of any submission counts: its content was made for the old type.
+      if (
+        input.type !== homework.type &&
+        (await Submission.count({ where: { homeworkId: homework.id }, transaction })) > 0
+      ) {
+        throw new AppError('HOMEWORK_TYPE_LOCKED');
+      }
+
+      homework.type = input.type;
+      homework.instructionsText = instructionsText;
+      await homework.save({ transaction });
+    }
+
+    return lessonDetail(lesson, 'teacher', transaction);
+  });
+}
+
+// Deletes the homework with its submissions, grades and notifications (the database
+// cascades them), then its instructions file and every submitted page once committed.
+export async function deleteHomework(
+  teacherId: string,
+  lessonId: string,
+): Promise<LessonDetailDto> {
+  const { detail, removedKeys } = await sequelize.transaction(async (transaction) => {
+    const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+    const homework = await requireHomework(lessonId, transaction);
+    const fileIds = [
+      ...(homework.instructionsFileId ? [homework.instructionsFileId] : []),
+      ...(await pageFileIds({ homeworkIds: [homework.id] }, transaction)),
+    ];
+
+    await homework.destroy({ transaction });
+
+    return {
+      removedKeys: await deleteFileRows(fileIds, transaction),
+      detail: await lessonDetail(lesson, 'teacher', transaction),
+    };
+  });
+
+  await removeStoredFiles(removedKeys);
+  return detail;
+}
+
+export async function setHomeworkFile(
+  teacherId: string,
+  lessonId: string,
+  upload: Upload,
+): Promise<LessonDetailDto> {
+  const { detail, replacedKeys } = await withStoredFile(upload.data, (storageKey) =>
+    sequelize.transaction(async (transaction) => {
+      const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+      const homework = await requireHomework(lessonId, transaction);
+      const file = await createFileRecord(
+        teacherId,
+        'instructions',
+        upload,
+        storageKey,
+        transaction,
+      );
+      const replacedId = homework.instructionsFileId;
+
+      homework.instructionsFileId = file.id;
+      await homework.save({ transaction });
+
+      return {
+        replacedKeys: replacedId ? await deleteFileRows([replacedId], transaction) : [],
+        detail: await lessonDetail(lesson, 'teacher', transaction),
+      };
+    }),
+  );
+
+  await removeStoredFiles(replacedKeys);
+  return detail;
+}
+
+export async function removeHomeworkFile(
+  teacherId: string,
+  lessonId: string,
+): Promise<LessonDetailDto> {
+  const { detail, removedKeys } = await sequelize.transaction(async (transaction) => {
+    const lesson = await lockLessonRow(teacherId, lessonId, transaction);
+    const homework = await requireHomework(lessonId, transaction);
+    const fileId = homework.instructionsFileId;
+
+    if (!fileId) {
+      throw new AppError('NOT_FOUND', 'Homework file not found');
+    }
+
+    homework.instructionsFileId = null;
+    await homework.save({ transaction });
+
+    return {
+      removedKeys: await deleteFileRows([fileId], transaction),
+      detail: await lessonDetail(lesson, 'teacher', transaction),
+    };
+  });
+
+  await removeStoredFiles(removedKeys);
+  return detail;
 }

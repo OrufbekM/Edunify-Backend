@@ -1,13 +1,15 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 
 import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
+import { getUpload, uploadLessonFile } from '../../middleware/upload.js';
 import {
   classParams,
   createLessonBody,
   createUnitBody,
+  putHomeworkBody,
   updateLessonBody,
   updateUnitBody,
 } from './schemas.js';
@@ -20,6 +22,22 @@ export const lessonsRouter = Router();
 // Routes with no requireRole take teachers and students both; the service decides what
 // each may see (contract 5).
 const teacherOnly = requireRole('teacher');
+
+// Runs before multer, so nobody can make the server buffer up to 20 MB for a lesson they
+// don't own (plan, Phase 7). The service checks again inside its transaction.
+function checkBeforeUpload(
+  check: (teacherId: string, lessonId: string) => Promise<void>,
+): RequestHandler {
+  return async (req, _res, next) => {
+    const { id } = idParamsSchema.parse(req.params);
+
+    await check(getAuth(req).id, id);
+    next();
+  };
+}
+
+const ownLessonFirst = checkBeforeUpload(lessons.assertOwnLesson);
+const ownHomeworkFirst = checkBeforeUpload(lessons.assertOwnHomework);
 
 lessonsRouter.get('/classes/:classId/outline', requireAuth, generalLimiter, async (req, res) => {
   const { classId } = classParams.parse(req.params);
@@ -76,3 +94,62 @@ lessonsRouter.delete('/lessons/:id', requireAuth, generalLimiter, teacherOnly, a
   await lessons.deleteLesson(getAuth(req).id, id);
   res.status(204).end();
 });
+
+lessonsRouter.put(
+  '/lessons/:id/lesson-file',
+  requireAuth,
+  generalLimiter,
+  teacherOnly,
+  ownLessonFirst,
+  uploadLessonFile,
+  async (req, res) => {
+    const { id } = idParamsSchema.parse(req.params);
+
+    res.json(await lessons.setLessonFile(getAuth(req).id, id, getUpload(req)));
+  },
+);
+
+lessonsRouter.delete('/lessons/:id/lesson-file', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+
+  res.json(await lessons.removeLessonFile(getAuth(req).id, id));
+});
+
+lessonsRouter.put('/lessons/:id/homework', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+  const body = putHomeworkBody.parse(req.body);
+
+  res.json(await lessons.putHomework(getAuth(req).id, id, body));
+});
+
+lessonsRouter.delete('/lessons/:id/homework', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+
+  res.json(await lessons.deleteHomework(getAuth(req).id, id));
+});
+
+lessonsRouter.put(
+  '/lessons/:id/homework/file',
+  requireAuth,
+  generalLimiter,
+  teacherOnly,
+  ownHomeworkFirst,
+  uploadLessonFile,
+  async (req, res) => {
+    const { id } = idParamsSchema.parse(req.params);
+
+    res.json(await lessons.setHomeworkFile(getAuth(req).id, id, getUpload(req)));
+  },
+);
+
+lessonsRouter.delete(
+  '/lessons/:id/homework/file',
+  requireAuth,
+  generalLimiter,
+  teacherOnly,
+  async (req, res) => {
+    const { id } = idParamsSchema.parse(req.params);
+
+    res.json(await lessons.removeHomeworkFile(getAuth(req).id, id));
+  },
+);

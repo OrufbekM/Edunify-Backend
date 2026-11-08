@@ -39,7 +39,11 @@ export function api(user?: TestUser) {
   return {
     get: (path: string) => sign(request(app).get(path)),
     post: (path: string, body: object = {}) => sign(request(app).post(path)).send(body),
+    put: (path: string, body: object = {}) => sign(request(app).put(path)).send(body),
     patch: (path: string, body: object = {}) => sign(request(app).patch(path)).send(body),
     delete: (path: string) => sign(request(app).delete(path)),
+    // A multipart PUT with one file in the field `file`.
+    upload: (path: string, content: Buffer, filename: string) =>
+      sign(request(app).put(path)).attach('file', content, filename),
   };
 }
