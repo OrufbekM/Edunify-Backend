@@ -267,10 +267,14 @@ export async function listMyClasses(userId: string): Promise<StudentClassDto[]> 
 // The gate for every student-facing service: the caller's row in the class, and only
 // while the caller has also claimed the class. Anything else is 404, so a student can't
 // tell a class they aren't linked to from one that doesn't exist (contract 2.4).
+//
+// With `lock`, the row is locked FOR NO KEY UPDATE, so a re-link or unlink of it waits for
+// the caller's transaction, or has already committed and the link is checked against it.
 export async function getActiveClassStudent(
   userId: string,
   classId: string,
   transaction?: Transaction,
+  { lock = false }: { lock?: boolean } = {},
 ): Promise<ClassStudent> {
   const row = await ClassStudent.findOne({
     where: {
@@ -282,6 +286,7 @@ export async function getActiveClassStudent(
                     AND cc.class_id = "ClassStudent"."class_id")`,
       ),
     },
+    ...(lock ? { lock: Transaction.LOCK.NO_KEY_UPDATE } : {}),
     transaction,
   });
 

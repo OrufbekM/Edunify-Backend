@@ -23,6 +23,7 @@ import {
   withStoredFile,
 } from '../files/service.js';
 import { getActiveClassStudent } from '../students/service.js';
+import { latestSubmissionOf, type SubmissionDto } from '../submissions/service.js';
 
 const UNIT_CAP = 100;
 const LESSON_CAP = 500;
@@ -63,7 +64,7 @@ export interface LessonDetailDto {
   order: number;
   lessonFile: FileRef | null;
   homework: HomeworkDto | null;
-  mySubmission?: null;
+  mySubmission?: SubmissionDto | null;
 }
 
 export interface OutlineDto {
@@ -75,13 +76,9 @@ function toUnitDto(unit: Unit): UnitDto {
   return { id: unit.id, classId: unit.classId, title: unit.title, order: unit.position };
 }
 
-// File URLs are signed afresh on every read (contract 7). A student's mySubmission arrives
-// with Phase 8; teacher responses carry no mySubmission key at all (contract 3).
-async function lessonDetail(
-  lesson: Lesson,
-  role: Role,
-  transaction?: Transaction,
-): Promise<LessonDetailDto> {
+// File URLs are signed afresh on every read (contract 7). Without mySubmission, which only
+// a student's GET /lessons/:id carries (contract 3).
+async function lessonDetail(lesson: Lesson, transaction?: Transaction): Promise<LessonDetailDto> {
   const homework = await Homework.findOne({ where: { lessonId: lesson.id }, transaction });
   const fileIds = [lesson.lessonFileId, homework?.instructionsFileId ?? null].filter(
     (id): id is string => id !== null,
@@ -93,7 +90,7 @@ async function lessonDetail(
     return file ? toFileRef(file) : null;
   };
 
-  const detail: LessonDetailDto = {
+  return {
     id: lesson.id,
     classId: lesson.classId,
     unitId: lesson.unitId,
@@ -110,8 +107,6 @@ async function lessonDetail(
         }
       : null,
   };
-
-  return role === 'student' ? { ...detail, mySubmission: null } : detail;
 }
 
 // One message for "missing" and "not yours", so the body reveals nothing (contract 2.4).
@@ -415,7 +410,7 @@ export async function createLesson(
       { transaction },
     );
 
-    return lessonDetail(lesson, 'teacher', transaction);
+    return lessonDetail(lesson, transaction);
   });
 }
 
@@ -471,7 +466,7 @@ export async function updateLesson(
       await lesson.reload({ transaction });
     }
 
-    return lessonDetail(lesson, 'teacher', transaction);
+    return lessonDetail(lesson, transaction);
   });
 }
 
@@ -496,7 +491,7 @@ export async function deleteLesson(teacherId: string, lessonId: string): Promise
 
 export async function getLesson(viewer: Viewer, lessonId: string): Promise<LessonDetailDto> {
   if (viewer.role === 'teacher') {
-    return lessonDetail(await findOwnLesson(viewer.id, lessonId), 'teacher');
+    return lessonDetail(await findOwnLesson(viewer.id, lessonId));
   }
 
   const lesson = await Lesson.findByPk(lessonId);
@@ -505,13 +500,21 @@ export async function getLesson(viewer: Viewer, lessonId: string): Promise<Lesso
     throw lessonNotFound();
   }
 
+  let row: Awaited<ReturnType<typeof getActiveClassStudent>>;
+
   try {
-    await getActiveClassStudent(viewer.id, lesson.classId);
+    row = await getActiveClassStudent(viewer.id, lesson.classId);
   } catch (err) {
     throw err instanceof AppError && err.code === 'NOT_FOUND' ? lessonNotFound() : err;
   }
 
-  return lessonDetail(lesson, 'student');
+  const detail = await lessonDetail(lesson);
+
+  // Their latest version, built for a student, so without aiSuggestion (contract 3).
+  return {
+    ...detail,
+    mySubmission: detail.homework ? await latestSubmissionOf(row.id, detail.homework.id) : null,
+  };
 }
 
 function homeworkNotFound(): AppError {
@@ -590,7 +593,7 @@ export async function setLessonFile(
 
       return {
         replacedKeys: replacedId ? await deleteFileRows([replacedId], transaction) : [],
-        detail: await lessonDetail(lesson, 'teacher', transaction),
+        detail: await lessonDetail(lesson, transaction),
       };
     }),
   );
@@ -616,7 +619,7 @@ export async function removeLessonFile(
 
     return {
       removedKeys: await deleteFileRows([fileId], transaction),
-      detail: await lessonDetail(lesson, 'teacher', transaction),
+      detail: await lessonDetail(lesson, transaction),
     };
   });
 
@@ -655,7 +658,7 @@ export async function putHomework(
       await homework.save({ transaction });
     }
 
-    return lessonDetail(lesson, 'teacher', transaction);
+    return lessonDetail(lesson, transaction);
   });
 }
 
@@ -677,7 +680,7 @@ export async function deleteHomework(
 
     return {
       removedKeys: await deleteFileRows(fileIds, transaction),
-      detail: await lessonDetail(lesson, 'teacher', transaction),
+      detail: await lessonDetail(lesson, transaction),
     };
   });
 
@@ -708,7 +711,7 @@ export async function setHomeworkFile(
 
       return {
         replacedKeys: replacedId ? await deleteFileRows([replacedId], transaction) : [],
-        detail: await lessonDetail(lesson, 'teacher', transaction),
+        detail: await lessonDetail(lesson, transaction),
       };
     }),
   );
@@ -735,7 +738,7 @@ export async function removeHomeworkFile(
 
     return {
       removedKeys: await deleteFileRows([fileId], transaction),
-      detail: await lessonDetail(lesson, 'teacher', transaction),
+      detail: await lessonDetail(lesson, transaction),
     };
   });
 

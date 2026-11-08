@@ -32,6 +32,7 @@ export interface Upload {
 declare module 'express-serve-static-core' {
   interface Request {
     upload?: Upload;
+    uploads?: Upload[];
   }
 }
 
@@ -90,17 +91,17 @@ export const PHOTO_PAGE_TYPES: FileTypes = {
   '.webp': WEBP,
 };
 
-function invalidFile(message: string): AppError {
-  return new AppError('VALIDATION_ERROR', 'Invalid upload', [{ path: 'file', message }]);
+function invalidFile(path: string, message: string): AppError {
+  return new AppError('VALIDATION_ERROR', 'Invalid upload', [{ path, message }]);
 }
 
 // Everything that can be judged from the name alone, so it runs before any bytes arrive.
-function typeForName(name: string, types: FileTypes): FileType {
+function typeForName(name: string, types: FileTypes, path: string): FileType {
   if (CONTROL_CHARACTERS.test(name)) {
-    throw invalidFile('File name contains control characters');
+    throw invalidFile(path, 'File name contains control characters');
   }
   if (name.length > MAX_NAME_LENGTH) {
-    throw invalidFile(`File name is longer than ${MAX_NAME_LENGTH} characters`);
+    throw invalidFile(path, `File name is longer than ${MAX_NAME_LENGTH} characters`);
   }
 
   const extension = extname(name).toLowerCase();
@@ -115,20 +116,21 @@ function typeForName(name: string, types: FileTypes): FileType {
   return types[extension] as FileType;
 }
 
-// Name, size, then content. Exported for the page uploads of Phase 8 and for tests.
+// Name, size, then content. `path` names the file in VALIDATION_ERROR details.
 export function checkFile(
   file: { originalname: string; buffer: Buffer } | undefined,
   types: FileTypes,
+  path = 'file',
 ): Upload {
   if (!file) {
-    throw invalidFile('Required');
+    throw invalidFile(path, 'Required');
   }
 
-  const type = typeForName(file.originalname, types);
+  const type = typeForName(file.originalname, types, path);
   const size = file.buffer.length;
 
   if (size === 0) {
-    throw invalidFile('Empty file');
+    throw invalidFile(path, 'Empty file');
   }
   if (size > type.maxSize) {
     throw new AppError('PAYLOAD_TOO_LARGE', `A ${type.mime} file may be at most ${type.maxSize} bytes`);
@@ -180,24 +182,31 @@ function withAppErrors(upload: RequestHandler, isCapError: IsCapError): RequestH
 // anything outside ASCII.
 const FILE_NAME_CHARSET = 'utf8';
 
+function largestSize(types: FileTypes): number {
+  return Math.max(...Object.values(types).map((type) => type.maxSize));
+}
+
+// Rejects a bad name or extension as soon as the part header arrives; multer then drains
+// the rest of the body without keeping it.
+function fileFilterFor(types: FileTypes, path: string): multer.Options['fileFilter'] {
+  return (_req, file, accept) => {
+    try {
+      typeForName(file.originalname, types, path);
+      accept(null, true);
+    } catch (err) {
+      accept(err as Error);
+    }
+  };
+}
+
 // One file in the field `file`, checked against `types`, and put on req.upload.
 export function createFileUpload({ types }: { types: FileTypes }): RequestHandler {
-  const maxFileSize = Math.max(...Object.values(types).map((type) => type.maxSize));
   const upload = withAppErrors(
     multer({
       storage: multer.memoryStorage(),
-      limits: { fileSize: maxFileSize, files: 1, fields: 0 },
+      limits: { fileSize: largestSize(types), files: 1, fields: 0 },
       defParamCharset: FILE_NAME_CHARSET,
-      // Rejects a bad name or extension as soon as the part header arrives; multer then
-      // drains the rest of the body without keeping it.
-      fileFilter: (_req, file, accept) => {
-        try {
-          typeForName(file.originalname, types);
-          accept(null, true);
-        } catch (err) {
-          accept(err as Error);
-        }
-      },
+      fileFilter: fileFilterFor(types, 'file'),
     }).single('file'),
     () => false,
   );
@@ -227,27 +236,62 @@ export function getUpload(req: Request): Upload {
   return req.upload;
 }
 
+export function getUploads(req: Request): Upload[] {
+  if (!req.uploads) {
+    throw new Error('getUploads called on a route without a pages upload');
+  }
+
+  return req.uploads;
+}
+
+// 1 to `maxPages` files in the repeated field `pages`, in upload order, each checked against
+// `types`, and put on req.uploads. A page too many is LIMIT_REACHED (contract 2.7).
 export function createPagesUpload({
-  maxFileSize,
+  types,
   maxPages,
 }: {
-  maxFileSize: number;
+  types: FileTypes;
   maxPages: number;
 }): RequestHandler {
-  const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: maxFileSize, files: maxPages, fields: 0 },
-    defParamCharset: FILE_NAME_CHARSET,
-  });
-
-  return withAppErrors(
-    upload.array('pages', maxPages),
+  const upload = withAppErrors(
+    multer({
+      storage: multer.memoryStorage(),
+      limits: { fileSize: largestSize(types), files: maxPages, fields: 0 },
+      defParamCharset: FILE_NAME_CHARSET,
+      fileFilter: fileFilterFor(types, 'pages'),
+    }).array('pages', maxPages),
     ({ code, field }) =>
       code === 'LIMIT_FILE_COUNT' || (code === 'LIMIT_UNEXPECTED_FILE' && field === 'pages'),
   );
+
+  return (req, res, next) => {
+    upload(req, res, (err?: unknown) => {
+      if (err) {
+        next(err);
+        return;
+      }
+
+      try {
+        const files = Array.isArray(req.files) ? req.files : [];
+
+        if (files.length === 0) {
+          throw invalidFile('pages', 'Required');
+        }
+
+        req.uploads = files.map((file, index) => checkFile(file, types, `pages.${index}`));
+        next();
+      } catch (checkErr) {
+        next(checkErr);
+      }
+    });
+  };
 }
+
+const MAX_PAGES = 9;
 
 export const uploadLessonFile = createFileUpload({ types: LESSON_FILE_TYPES });
 
-// Page types depend on the homework, so Phase 8 checks each page with checkFile.
-export const uploadPages = createPagesUpload({ maxFileSize: 10 * MB, maxPages: 9 });
+// Draw and math pages share their rules (math is stored exactly like draw, contract 3).
+export const uploadDrawPages = createPagesUpload({ types: DRAW_PAGE_TYPES, maxPages: MAX_PAGES });
+
+export const uploadPhotoPages = createPagesUpload({ types: PHOTO_PAGE_TYPES, maxPages: MAX_PAGES });

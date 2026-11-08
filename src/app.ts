@@ -10,7 +10,9 @@ import { categoriesRouter } from './modules/categories/routes.js';
 import { classesRouter } from './modules/classes/routes.js';
 import { filesRouter } from './modules/files/routes.js';
 import { lessonsRouter } from './modules/lessons/routes.js';
+import { notificationsRouter } from './modules/notifications/routes.js';
 import { classStudentsRouter, studentRouter } from './modules/students/routes.js';
+import { submissionsRouter } from './modules/submissions/routes.js';
 
 export const app = express();
 
@@ -34,13 +36,16 @@ app.get('/api/v1/health', (_req, res) => {
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/me', meRouter);
 app.use('/api/v1/categories', categoriesRouter);
-// Both before classesRouter, whose teacher-only guards would otherwise run first on these
-// paths too (students may read a class outline).
+// These come before classesRouter and studentRouter, whose router-wide guards would
+// otherwise run first on their paths too (students read a class outline, and
+// /student/submissions lives with the other submission routes).
 app.use('/api/v1/classes/:classId/students', classStudentsRouter);
 app.use('/api/v1', lessonsRouter);
+app.use('/api/v1', submissionsRouter);
 app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
 app.use('/api/v1/files', filesRouter);
+app.use('/api/v1/notifications', notificationsRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

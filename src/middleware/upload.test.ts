@@ -12,8 +12,10 @@ import {
   createFileUpload,
   createPagesUpload,
   getUpload,
+  getUploads,
+  uploadDrawPages,
   uploadLessonFile,
-  uploadPages,
+  uploadPhotoPages,
   type FileTypes,
 } from './upload.js';
 
@@ -46,13 +48,12 @@ function fileApp(upload: RequestHandler): Express {
 function pagesApp(upload: RequestHandler): Express {
   const app = express();
   app.post('/', upload, (req, res) => {
-    const pages = Array.isArray(req.files) ? req.files : [];
     res.json({
-      files: pages.map(({ fieldname, originalname, buffer }) => ({
-        fieldname,
-        originalname,
-        size: buffer.length,
-        start: buffer.subarray(0, 8).toString(),
+      pages: getUploads(req).map(({ originalName, mime, size, data }) => ({
+        originalName,
+        mime,
+        size,
+        tail: data.subarray(PNG.length).toString(),
       })),
     });
   });
@@ -60,11 +61,12 @@ function pagesApp(upload: RequestHandler): Express {
   return app;
 }
 
+// PNG pages that say which one they are after the signature.
 function attachPages(app: Express, count: number, field = 'pages') {
   let pending = request(app).post('/');
 
   for (let i = 1; i <= count; i += 1) {
-    pending = pending.attach(field, Buffer.from(`page ${i}`), `page-${i}.png`);
+    pending = pending.attach(field, Buffer.concat([PNG, Buffer.from(`page ${i}`)]), `page-${i}.png`);
   }
 
   return pending;
@@ -340,43 +342,61 @@ describe('checkFile', () => {
   });
 });
 
-describe('uploadPages', () => {
-  const app = pagesApp(uploadPages);
+describe('uploadDrawPages', () => {
+  const app = pagesApp(uploadDrawPages);
 
-  it('puts the buffers on req.files in upload order', async () => {
+  it('puts the checked pages on req.uploads in upload order', async () => {
     const res = await attachPages(app, 9);
 
     expect(res.status).toBe(200);
-    expect(res.body.files).toHaveLength(9);
-    expect(res.body.files.map((file: { start: string }) => file.start)).toEqual(
+    expect(res.body.pages).toHaveLength(9);
+    expect(res.body.pages.map((page: { tail: string }) => page.tail)).toEqual(
       Array.from({ length: 9 }, (_, index) => `page ${index + 1}`),
     );
+    expect(res.body.pages[0]).toMatchObject({ originalName: 'page-1.png', mime: 'image/png' });
   });
 
   it('keeps page names outside ASCII as sent', async () => {
     const res = await request(app).post('/').attach('pages', PNG, 'sahifa-1 (тест).png');
 
-    expect(res.body.files[0].originalname).toBe('sahifa-1 (тест).png');
+    expect(res.body.pages[0].originalName).toBe('sahifa-1 (тест).png');
   });
 
   it('gives 409 LIMIT_REACHED for a 10th page', async () => {
-    const res = await attachPages(app, 10);
-
-    expect(res.status).toBe(409);
-    expect(res.body).toEqual({ error: { code: 'LIMIT_REACHED', message: expect.any(String) } });
+    expectError(await attachPages(app, 10), 409, 'LIMIT_REACHED');
   });
 
-  it('accepts a page of exactly 10 MB', async () => {
-    const res = await request(app).post('/').attach('pages', Buffer.alloc(10 * MB), 'page.png');
+  it('accepts a page of exactly 10 MB and gives 413 one byte over', async () => {
+    const send = (size: number) => request(app).post('/').attach('pages', sized(PNG, size), 'page.png');
 
-    expect(res.status).toBe(200);
+    expect((await send(10 * MB)).status).toBe(200);
+    expectError(await send(10 * MB + 1), 413, 'PAYLOAD_TOO_LARGE');
   });
 
-  it('gives 413 PAYLOAD_TOO_LARGE one byte over 10 MB', async () => {
-    const res = await request(app).post('/').attach('pages', Buffer.alloc(10 * MB + 1), 'page.png');
+  it('gives 415 for a JPEG page, and for JPEG bytes named .png', async () => {
+    expectError(await request(app).post('/').attach('pages', JPEG, 'page.jpg'), 415, 'UNSUPPORTED_MEDIA_TYPE');
+    expectError(await request(app).post('/').attach('pages', JPEG, 'page.png'), 415, 'UNSUPPORTED_MEDIA_TYPE');
+  });
 
-    expect(res.status).toBe(413);
-    expect(res.body.error.code).toBe('PAYLOAD_TOO_LARGE');
+  it('rejects a wrong page type before reading its bytes, even past the size limit', async () => {
+    expectError(
+      await request(app).post('/').attach('pages', Buffer.alloc(15 * MB), 'video.mp4'),
+      415,
+      'UNSUPPORTED_MEDIA_TYPE',
+    );
+  });
+
+  it('names the page in the details of a page-level 400', async () => {
+    const res = await request(app)
+      .post('/')
+      .attach('pages', PNG, 'page-1.png')
+      .attach('pages', Buffer.alloc(0), 'page-2.png');
+
+    expectValidationError(res, 'pages.1');
+  });
+
+  it('gives 400 when no page was sent', async () => {
+    expectValidationError(await request(app).post('/').send({ text: 'not pages' }), 'pages');
   });
 
   it('gives 400 with the field name for a wrong field', async () => {
@@ -384,12 +404,34 @@ describe('uploadPages', () => {
   });
 
   it('gives 400 for a text field', async () => {
-    const res = await request(app)
-      .post('/')
-      .field('note', 'hello')
-      .attach('pages', Buffer.from('x'), 'page.png');
+    const res = await request(app).post('/').field('note', 'hello').attach('pages', PNG, 'page.png');
 
     expectValidationError(res, '');
+  });
+});
+
+describe('uploadPhotoPages', () => {
+  const app = pagesApp(uploadPhotoPages);
+
+  it('takes JPEG, PNG and WebP pages in one submission', async () => {
+    const res = await request(app)
+      .post('/')
+      .attach('pages', JPEG, 'one.jpg')
+      .attach('pages', PNG, 'two.PNG')
+      .attach('pages', WEBP, 'three.webp')
+      .attach('pages', JPEG, 'four.jpeg');
+
+    expect(res.status).toBe(200);
+    expect(res.body.pages.map((page: { mime: string }) => page.mime)).toEqual([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'image/jpeg',
+    ]);
+  });
+
+  it('gives 415 for a GIF page', async () => {
+    expectError(await request(app).post('/').attach('pages', GIF, 'photo.gif'), 415, 'UNSUPPORTED_MEDIA_TYPE');
   });
 });
 
@@ -415,7 +457,9 @@ describe('factories', () => {
   });
 
   it('createPagesUpload applies its page and size limits', async () => {
-    const app = pagesApp(createPagesUpload({ maxFileSize: 4, maxPages: 2 }));
+    const app = pagesApp(
+      createPagesUpload({ types: { '.png': { mime: 'image/png', maxSize: 4, ...anyContent } }, maxPages: 2 }),
+    );
 
     const allowed = await request(app)
       .post('/')
