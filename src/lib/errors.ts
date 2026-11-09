@@ -39,3 +39,13 @@ export class AppError extends Error {
     this.details = details;
   }
 }
+
+// The same 404 body whether the thing is missing or the caller can't see it (contract 2.4):
+// a NOT_FOUND from a check on something else becomes the caller's own.
+export async function notFoundAs<T>(work: Promise<T>, notFound: () => AppError): Promise<T> {
+  try {
+    return await work;
+  } catch (err) {
+    throw err instanceof AppError && err.code === 'NOT_FOUND' ? notFound() : err;
+  }
+}

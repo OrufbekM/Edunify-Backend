@@ -28,7 +28,8 @@ export interface StudentClassDto {
 }
 
 // The claim join feeds linkState and nothing else: teachers never see claims (contract 6.2).
-async function rosterRows(
+// Sorted by fullName, ignoring case.
+export async function rosterRows(
   classId: string,
   options: { studentId?: string; transaction?: Transaction } = {},
 ): Promise<ClassStudentDto[]> {
@@ -246,7 +247,10 @@ export async function claimClass(userId: string, input: { classPublicId: string 
 }
 
 // Active links only (contract 6.2); the class publicId stays with the teacher (contract 6.1).
-export async function listMyClasses(userId: string): Promise<StudentClassDto[]> {
+export async function listMyClasses(
+  userId: string,
+  transaction?: Transaction,
+): Promise<StudentClassDto[]> {
   return sequelize.query<StudentClassDto>(
     `SELECT c.id,
             c.subject,
@@ -260,7 +264,7 @@ export async function listMyClasses(userId: string): Promise<StudentClassDto[]> 
        JOIN users t ON t.id = c.teacher_id
       WHERE cs.student_user_id = $userId
       ORDER BY lower(c.subject), c.subject, lower(c.name), c.name, c.id`,
-    { bind: { userId }, type: QueryTypes.SELECT },
+    { bind: { userId }, type: QueryTypes.SELECT, transaction },
   );
 }
 

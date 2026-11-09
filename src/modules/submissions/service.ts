@@ -16,7 +16,7 @@ import {
   SubmissionPage,
   type ClassStudent,
 } from '../../db/models/index.js';
-import { AppError } from '../../lib/errors.js';
+import { AppError, notFoundAs } from '../../lib/errors.js';
 import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
 import type { Upload } from '../../middleware/upload.js';
 import { getOwnClass } from '../classes/service.js';
@@ -265,6 +265,21 @@ async function toDtos(
   });
 }
 
+// For other modules: the submissions with these ids, keyed by id, built for the role.
+export async function submissionDtosById(
+  ids: string[],
+  role: Role,
+  transaction?: Transaction,
+): Promise<Map<string, SubmissionDto>> {
+  if (ids.length === 0) {
+    return new Map();
+  }
+
+  const rows = await submissionRows('WHERE s.id = ANY($ids::uuid[])', { ids }, transaction);
+
+  return new Map((await toDtos(rows, role, transaction)).map((dto) => [dto.id, dto]));
+}
+
 function toVersionDto(submission: Submission): SubmissionVersionDto {
   return {
     id: submission.id,
@@ -283,15 +298,6 @@ function homeworkNotFound(): AppError {
 
 function submissionNotFound(): AppError {
   return new AppError('NOT_FOUND', 'Submission not found');
-}
-
-// The same 404 body whether the thing is missing or the caller can't see it (contract 2.4).
-async function notFoundAs<T>(work: Promise<T>, notFound: () => AppError): Promise<T> {
-  try {
-    return await work;
-  } catch (err) {
-    throw err instanceof AppError && err.code === 'NOT_FOUND' ? notFound() : err;
-  }
 }
 
 function isPageType(type: HomeworkType): type is PageType {
@@ -500,10 +506,10 @@ export async function listMySubmissions(
     return [];
   }
 
-  const rows = await submissionRows('WHERE s.id = ANY($ids::uuid[])', {
-    ids: items.map((item) => item.submissionId),
-  });
-  const dtos = new Map((await toDtos(rows, 'student')).map((dto) => [dto.id, dto]));
+  const dtos = await submissionDtosById(
+    items.map((item) => item.submissionId),
+    'student',
+  );
 
   return items.map((item) => ({
     submission: dtos.get(item.submissionId) as SubmissionDto,

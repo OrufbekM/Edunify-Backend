@@ -72,13 +72,13 @@ export interface OutlineDto {
   lessons: LessonSummaryDto[];
 }
 
-function toUnitDto(unit: Unit): UnitDto {
+export function toUnitDto(unit: Unit): UnitDto {
   return { id: unit.id, classId: unit.classId, title: unit.title, order: unit.position };
 }
 
 // File URLs are signed afresh on every read (contract 7). Without mySubmission, which only
 // a student's GET /lessons/:id carries (contract 3).
-async function lessonDetail(lesson: Lesson, transaction?: Transaction): Promise<LessonDetailDto> {
+export async function lessonDetail(lesson: Lesson, transaction?: Transaction): Promise<LessonDetailDto> {
   const homework = await Homework.findOne({ where: { lessonId: lesson.id }, transaction });
   const fileIds = [lesson.lessonFileId, homework?.instructionsFileId ?? null].filter(
     (id): id is string => id !== null,

@@ -45,6 +45,19 @@ export async function removeUnread(
   await Notification.destroy({ where: { userId, submissionId, readAt: null }, transaction });
 }
 
+// Removing a grade takes back the unread graded or denied notice for it (contract 8.12),
+// from whichever account got it: the row may have been re-linked since. Read ones stay,
+// and so does the teacher's own submitted notice.
+export async function removeUnreadGradeNotices(
+  submissionId: string,
+  transaction?: Transaction,
+): Promise<void> {
+  await Notification.destroy({
+    where: { submissionId, readAt: null, kind: ['graded', 'denied'] },
+    transaction,
+  });
+}
+
 // Unread, and about a submission the user can still open: in a class they teach, or on a
 // roster row actively linked to them. A student re-linked away from a row stops seeing its
 // notifications, as they stop seeing the class (contract 6.3).

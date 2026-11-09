@@ -9,6 +9,8 @@ import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
 import { classesRouter } from './modules/classes/routes.js';
 import { filesRouter } from './modules/files/routes.js';
+import { gradingRouter } from './modules/grading/routes.js';
+import { journalRouter } from './modules/journal/routes.js';
 import { lessonsRouter } from './modules/lessons/routes.js';
 import { notificationsRouter } from './modules/notifications/routes.js';
 import { classStudentsRouter, studentRouter } from './modules/students/routes.js';
@@ -38,10 +40,12 @@ app.use('/api/v1/me', meRouter);
 app.use('/api/v1/categories', categoriesRouter);
 // These come before classesRouter and studentRouter, whose router-wide guards would
 // otherwise run first on their paths too (students read a class outline, and
-// /student/submissions lives with the other submission routes).
+// /student/submissions and /student/grades live with their own modules).
 app.use('/api/v1/classes/:classId/students', classStudentsRouter);
 app.use('/api/v1', lessonsRouter);
 app.use('/api/v1', submissionsRouter);
+app.use('/api/v1', gradingRouter);
+app.use('/api/v1', journalRouter);
 app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
 app.use('/api/v1/files', filesRouter);
