@@ -28,7 +28,8 @@ export class Submission extends Model<
   // Text or code content; null for the page types, which live in submission_pages.
   // Shape is validated with zod in the service layer, not here.
   declare content: unknown;
-  // Exactly one of gradeValue and gradeDenied is set; the database enforces it.
+  // At most one of gradeValue and gradeDenied is set (neither until it is graded); the
+  // database enforces it.
   declare gradeValue: number | null;
   declare gradeDenied: CreationOptional<boolean>;
   declare gradeComment: string | null;
