@@ -5,6 +5,7 @@ import { pinoHttp } from 'pino-http';
 
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
+import { aiRouter } from './modules/ai/routes.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
 import { classesRouter } from './modules/classes/routes.js';
@@ -46,6 +47,7 @@ app.use('/api/v1', lessonsRouter);
 app.use('/api/v1', submissionsRouter);
 app.use('/api/v1', gradingRouter);
 app.use('/api/v1', journalRouter);
+app.use('/api/v1', aiRouter);
 app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
 app.use('/api/v1/files', filesRouter);

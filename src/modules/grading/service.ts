@@ -6,7 +6,12 @@ import { AppError, notFoundAs } from '../../lib/errors.js';
 import { getOwnClass } from '../classes/service.js';
 import { lessonDetail, type HomeworkDto } from '../lessons/service.js';
 import { notify, removeUnreadGradeNotices } from '../notifications/service.js';
-import { submissionDtosById, type Grade, type SubmissionDto } from '../submissions/service.js';
+import {
+  lockSubmission,
+  submissionDtosById,
+  type Grade,
+  type SubmissionDto,
+} from '../submissions/service.js';
 
 export type GradeInput =
   | { status: 'graded'; value: Grade; comment: string | null; fromAi: boolean }
@@ -93,18 +98,16 @@ export async function getGrading(teacherId: string, lessonId: string): Promise<G
   );
 }
 
-// Ownership first, so a stranger takes no locks. Then the locks a new submission takes, in
-// the same order (homework FOR SHARE, then the roster row): a grade and a new version go one
-// after the other, and "latest" is checked against what has committed. A delete of the
-// homework, lesson, unit, class or row waits for these locks or has already happened, and
-// then the submission is gone: 404.
+// Ownership first, so a stranger takes no locks; then the locks a new version takes, so a
+// grade and a new version can't cross (see lockSubmission). A submission deleted meanwhile
+// is a 404.
 async function lockLatest(
   teacherId: string,
   submissionId: string,
   transaction: Transaction,
 ): Promise<{ submission: Submission; row: ClassStudent }> {
   const found = await Submission.findByPk(submissionId, {
-    attributes: ['homeworkId', 'classStudentId'],
+    attributes: ['homeworkId'],
     transaction,
   });
   const homework =
@@ -112,38 +115,23 @@ async function lockLatest(
   const lesson =
     homework && (await Lesson.findByPk(homework.lessonId, { attributes: ['classId'], transaction }));
 
-  if (!found || !lesson) {
+  if (!lesson) {
     throw submissionNotFound();
   }
 
   await notFoundAs(getOwnClass(teacherId, lesson.classId, transaction), submissionNotFound);
 
-  const locked = await Homework.findByPk(found.homeworkId, {
-    lock: Transaction.LOCK.SHARE,
-    transaction,
-  });
-  const row =
-    locked &&
-    (await ClassStudent.findByPk(found.classStudentId, {
-      lock: Transaction.LOCK.NO_KEY_UPDATE,
-      transaction,
-    }));
-  const submission = row && (await Submission.findByPk(submissionId, { transaction }));
+  const locked = await lockSubmission(submissionId, transaction);
 
-  if (!row || !submission) {
+  if (!locked) {
     throw submissionNotFound();
   }
 
-  const latest = await Submission.max<number, Submission>('version', {
-    where: { homeworkId: submission.homeworkId, classStudentId: submission.classStudentId },
-    transaction,
-  });
-
-  if (submission.version !== latest) {
+  if (!locked.isLatest) {
     throw new AppError('SUBMISSION_NOT_LATEST');
   }
 
-  return { submission, row };
+  return locked;
 }
 
 async function teacherDto(submissionId: string, transaction: Transaction): Promise<SubmissionDto> {

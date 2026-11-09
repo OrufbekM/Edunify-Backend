@@ -9,12 +9,12 @@ import type {
   SubmissionStatus,
 } from '../../db/models/enums.js';
 import {
+  ClassStudent,
   Homework,
   Lesson,
   SchoolClass,
   Submission,
   SubmissionPage,
-  type ClassStudent,
 } from '../../db/models/index.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
 import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
@@ -263,6 +263,42 @@ async function toDtos(
       ? { ...dto, aiSuggestion: storedAiSuggestion.parse(row.aiSuggestion ?? null) }
       : dto;
   });
+}
+
+// For changes to an existing submission (a grade, an AI suggestion): the locks a new
+// version takes, in its order (homework FOR SHARE, then the roster row), so the change and
+// a new version go one after the other and "latest" is judged on what has committed. A
+// delete of the homework, lesson, unit, class or row waits for these locks or has already
+// happened; then the submission is gone and this returns null.
+export async function lockSubmission(
+  submissionId: string,
+  transaction: Transaction,
+): Promise<{ submission: Submission; row: ClassStudent; isLatest: boolean } | null> {
+  const found = await Submission.findByPk(submissionId, {
+    attributes: ['homeworkId', 'classStudentId'],
+    transaction,
+  });
+  const homework =
+    found &&
+    (await Homework.findByPk(found.homeworkId, { lock: Transaction.LOCK.SHARE, transaction }));
+  const row =
+    homework &&
+    (await ClassStudent.findByPk(found.classStudentId, {
+      lock: Transaction.LOCK.NO_KEY_UPDATE,
+      transaction,
+    }));
+  const submission = row && (await Submission.findByPk(submissionId, { transaction }));
+
+  if (!row || !submission) {
+    return null;
+  }
+
+  const latest = await Submission.max<number, Submission>('version', {
+    where: { homeworkId: submission.homeworkId, classStudentId: submission.classStudentId },
+    transaction,
+  });
+
+  return { submission, row, isLatest: submission.version === latest };
 }
 
 // For other modules: the submissions with these ids, keyed by id, built for the role.

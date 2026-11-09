@@ -1,5 +1,6 @@
 import { app } from './app.js';
 import { env } from './config/env.js';
+import { startAiWorker } from './jobs/aiWorker.js';
 import { sequelize } from './db/index.js';
 import { logger } from './lib/logger.js';
 import { initStorage } from './storage/index.js';
@@ -28,4 +29,5 @@ app.listen(env.PORT, (err) => {
   }
 
   logger.info(`EdunifyBackend running on http://localhost:${env.PORT}`);
+  startAiWorker();
 });
