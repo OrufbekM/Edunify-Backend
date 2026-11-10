@@ -4,13 +4,19 @@ import { env } from '../config/env.js';
 import { AppError } from './errors.js';
 
 export const FILE_URL_TTL_SECONDS = 900;
+// exp is rounded up to a multiple of this, so a file's URL comes out the same every time it
+// is signed within one window. A browser can then serve the file from its cache instead of
+// downloading it again on every page load. Each URL is valid for at least the TTL and less
+// than TTL + window.
+export const FILE_URL_WINDOW_SECONDS = 300;
 
 function computeSignature(fileId: string, exp: string): Buffer {
   return createHmac('sha256', env.FILE_URL_SECRET).update(`${fileId}:${exp}`).digest();
 }
 
 export function signFileUrl(fileId: string, now = new Date()): { url: string; expiresAt: string } {
-  const exp = Math.floor(now.getTime() / 1000) + FILE_URL_TTL_SECONDS;
+  const earliest = Math.floor(now.getTime() / 1000) + FILE_URL_TTL_SECONDS;
+  const exp = Math.ceil(earliest / FILE_URL_WINDOW_SECONDS) * FILE_URL_WINDOW_SECONDS;
   const sig = computeSignature(fileId, String(exp)).toString('hex');
 
   return {

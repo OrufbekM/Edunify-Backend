@@ -24,12 +24,15 @@ interface RateLimiterOptions {
   windowMs: number;
   limit: number;
   keyGenerator?: (req: Request) => string;
+  // Count only requests that end with an error status (400 and up).
+  skipSuccessfulRequests?: boolean;
 }
 
 export function createRateLimiter({
   windowMs,
   limit,
   keyGenerator,
+  skipSuccessfulRequests,
 }: RateLimiterOptions): RateLimitRequestHandler {
   const store = new MemoryStore();
   stores.push(store);
@@ -38,6 +41,7 @@ export function createRateLimiter({
     windowMs,
     limit,
     keyGenerator,
+    skipSuccessfulRequests,
     store,
     standardHeaders: false,
     legacyHeaders: false,
@@ -76,6 +80,17 @@ export const loginLimiter = createRateLimiter({
   windowMs: 15 * MINUTE,
   limit: 10,
   keyGenerator: loginKey,
+});
+
+// loginLimiter alone lets one IP try a different email each time, held back only by the
+// general limit: up to 300 password checks a minute, each one deliberately slow. This caps
+// failed sign-ins per IP whatever the email. Successful ones don't count, so a school where
+// everyone shares one IP isn't locked out by its own pupils signing in.
+export const loginFailureLimiter = createRateLimiter({
+  windowMs: 15 * MINUTE,
+  limit: 100,
+  keyGenerator: ipKey,
+  skipSuccessfulRequests: true,
 });
 
 export const registerLimiter = createRateLimiter({ windowMs: HOUR, limit: 10 });

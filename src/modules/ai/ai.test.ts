@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import request from 'supertest';
 import { Transaction } from 'sequelize';
+import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { app } from '../../app.js';
@@ -11,7 +12,7 @@ import { AiJob, Lesson, Submission } from '../../db/models/index.js';
 import { startAiWorker } from '../../jobs/aiWorker.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
-import { waitUntilBlocked } from '../../test/files.js';
+import { getFile, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 import { model, type ModelRequest, type ModelResponse } from './model.js';
 import { SYSTEM_PROMPT } from './prompt.js';
@@ -20,9 +21,12 @@ import { onJobQueued, requeueRunningJobs, runNextJob } from './service.js';
 useTestDatabase();
 
 const ISO_MILLIS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
-const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
-const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]);
+// Real images: the worker decodes each page to check that it fits the model's limits.
+const blank = (width: number, height: number) =>
+  sharp({ create: { width, height, channels: 3, background: '#ffffff' } });
+const PNG = await blank(4, 3).png().toBuffer();
+const JPEG = await blank(4, 3).jpeg().toBuffer();
+const WEBP = await blank(4, 3).webp().toBuffer();
 const PDF = Buffer.from('%PDF-1.4\nsecret pdf body\n%%EOF\n');
 
 const realKey = env.ANTHROPIC_API_KEY;
@@ -472,6 +476,27 @@ describe('the worker', () => {
       { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') },
     ]);
     expect(textOf(send.mock.calls[0]?.[0] as ModelRequest)).toContain('Page 3:');
+  });
+
+  it('scales down a page too large for the model, and leaves the stored page as it was', async () => {
+    const wide = await blank(3000, 100).png().toBuffer();
+    const photo = await addHomework('photo', { title: 'Wide' });
+    const submitted = await request(app)
+      .post(`/api/v1/homeworks/${photo.homeworkId}/submissions`)
+      .set('Authorization', `Bearer ${student.token}`)
+      .attach('pages', wide, 'wide.png');
+    const send = stubModel(() => reply({ value: 4, comment: 'Neat' }));
+    await startJob(undefined, photo.lessonId);
+
+    await runNextJob();
+
+    const [image] = blocksOf(send.mock.calls[0]?.[0] as ModelRequest).filter((block) => block.type === 'image');
+    expect(image?.source?.media_type).toBe('image/png');
+    expect(await sharp(Buffer.from(image?.source?.data ?? '', 'base64')).metadata()).toMatchObject({
+      width: 2576,
+      height: 86,
+    });
+    expect((await getFile(submitted.body.content.pages[0].url)).body).toEqual(wide);
   });
 
   it('asks for refusal fallbacks on a model that takes them', async () => {

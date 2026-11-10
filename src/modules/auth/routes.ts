@@ -3,7 +3,12 @@ import { Router, type CookieOptions, type Request, type Response } from 'express
 import { env } from '../../config/env.js';
 import { REFRESH_TOKEN_TTL_SECONDS } from '../../lib/tokens.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
-import { generalLimiter, loginLimiter, registerLimiter } from '../../middleware/rateLimit.js';
+import {
+  generalLimiter,
+  loginFailureLimiter,
+  loginLimiter,
+  registerLimiter,
+} from '../../middleware/rateLimit.js';
 import {
   changePasswordBody,
   loginBody,
@@ -45,7 +50,8 @@ authRouter.post('/register', registerLimiter, async (req, res) => {
   res.status(201).json(session);
 });
 
-authRouter.post('/login', loginLimiter, async (req, res) => {
+// Per IP and email first, so a request it turns away isn't also counted as a failure per IP.
+authRouter.post('/login', loginLimiter, loginFailureLimiter, async (req, res) => {
   const { refreshToken, ...session } = await auth.login(loginBody.parse(req.body));
 
   setRefreshCookie(res, refreshToken);

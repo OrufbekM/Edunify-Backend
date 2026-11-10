@@ -2,16 +2,18 @@ import { randomUUID } from 'node:crypto';
 
 import express, { type Express, type RequestHandler } from 'express';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { errorHandler } from './error.js';
 import {
   aiGradeLimiter,
   createRateLimiter,
   generalLimiter,
+  loginFailureLimiter,
   loginLimiter,
   publicIdLookupLimiter,
   registerLimiter,
+  resetRateLimits,
 } from './rateLimit.js';
 
 // Stands in for requireAuth so a test can choose the user behind a request.
@@ -148,6 +150,45 @@ describe('loginLimiter', () => {
     }
 
     expect((await post(app, { body: { email: 'y'.repeat(255) } })).status).toBe(429);
+  });
+});
+
+describe('loginFailureLimiter', () => {
+  // Answers 401, as a wrong password does, unless the body says the sign-in works.
+  const app = express();
+  app.use(express.json());
+  app.post('/', loginFailureLimiter, (req, res) => {
+    res.status(req.body?.ok === true ? 200 : 401).json({});
+  });
+  app.use(errorHandler);
+
+  const attempt = (email: string, ok = false) => request(app).post('/').send({ email, ok });
+
+  beforeEach(async () => {
+    await resetRateLimits();
+  });
+
+  it('allows 100 failed sign-ins per IP, whatever the emails', async () => {
+    for (let i = 0; i < 100; i += 1) {
+      expect((await attempt(`user${i}@example.com`)).status).toBe(401);
+    }
+    const res = await attempt('one-more@example.com');
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe('RATE_LIMITED');
+    expectRetryAfterNear(res, 15 * 60);
+  });
+
+  it('does not count successful sign-ins', async () => {
+    for (let i = 0; i < 99; i += 1) {
+      expect((await attempt(`user${i}@example.com`)).status).toBe(401);
+    }
+    for (let i = 0; i < 150; i += 1) {
+      expect((await attempt(`pupil${i}@example.com`, true)).status).toBe(200);
+    }
+
+    expect((await attempt('last@example.com')).status).toBe(401);
+    expect((await attempt('over@example.com')).status).toBe(429);
   });
 });
 

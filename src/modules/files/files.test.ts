@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../app.js';
 import type { FileRecord } from '../../db/models/index.js';
 import { logger } from '../../lib/logger.js';
-import { FILE_URL_TTL_SECONDS, signFileUrl } from '../../lib/signedUrl.js';
+import { FILE_URL_TTL_SECONDS, FILE_URL_WINDOW_SECONDS, signFileUrl } from '../../lib/signedUrl.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { storage } from '../../storage/index.js';
 import { useTestDatabase } from '../../test/database.js';
@@ -98,10 +98,12 @@ describe('GET /files/:id', () => {
     expect(res.text).toBeUndefined();
   });
 
-  it('accepts a URL until it expires and rejects it one second after', async () => {
+  it('accepts a URL until it expires and rejects it after', async () => {
     const file = await storePdf();
+    // Signed almost a TTL ago: at least 5 seconds left. Signed a TTL plus a window ago: past
+    // its expiry whichever way it was rounded.
     const almostExpired = new Date(Date.now() - (FILE_URL_TTL_SECONDS - 5) * 1000);
-    const expired = new Date(Date.now() - (FILE_URL_TTL_SECONDS + 1) * 1000);
+    const expired = new Date(Date.now() - (FILE_URL_TTL_SECONDS + FILE_URL_WINDOW_SECONDS) * 1000);
 
     expect((await getFile(signFileUrl(file.id, almostExpired).url)).status).toBe(200);
     expectInvalidUrl(await getFile(signFileUrl(file.id, expired).url));

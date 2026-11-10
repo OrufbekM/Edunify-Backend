@@ -138,6 +138,7 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | Rate limit | Allowed |
 |---|---|
 | `POST /auth/login` | 10 per 15 minutes per IP and email |
+| Failed `POST /auth/login` | 100 per 15 minutes per IP, whatever the email; successful sign-ins don't count |
 | `POST /auth/register` | 10 per hour per IP |
 | Looking up an ID (`POST /student/claims`, adding or changing a roster row with `studentPublicId`) | 30 per 10 minutes per user |
 | `POST /lessons/:lessonId/ai-grade` | 5 per minute per user |
@@ -173,7 +174,7 @@ Students and classes each have an 8-character public ID made of `a-z` and `0-9`.
 
 ### Files
 
-Files come back as a `FileRef` whose `url` is a signed link, valid for 15 minutes (`expiresAt`). Use it directly in `<img>`, `<iframe>` or `fetch`: it needs no `Authorization` header. If it answers `403 FILE_URL_INVALID`, the link has expired: reload whatever gave you the `FileRef` to get a fresh one.
+Files come back as a `FileRef` whose `url` is a signed link, valid for at least 15 minutes, until `expiresAt`. A file's `url` stays the same for every response within the same 5 minutes, so the browser can show it from its cache instead of downloading it again. Use it directly in `<img>`, `<iframe>` or `fetch`: it needs no `Authorization` header. If it answers `403 FILE_URL_INVALID`, the link has expired: reload whatever gave you the `FileRef` to get a fresh one.
 
 | Upload | Types | Largest |
 |---|---|---|
@@ -209,7 +210,7 @@ interface FileRef {
   name: string                 // the original file name
   mime: string
   size: number                 // bytes
-  url: string                  // signed, valid 15 minutes
+  url: string                  // signed, valid at least 15 minutes
   expiresAt: string
 }
 
@@ -441,7 +442,7 @@ Both show only lessons that have homework, as columns in outline order, with one
 
 ### AI grading (teachers)
 
-Claude reads the lesson's Markdown file, the homework instructions and the student's work, and suggests a grade and a comment. It never grades on its own: the suggestion is shown only to the teacher, who confirms it with `PUT /submissions/:id/grade` and `fromAi: true`. PDFs are not sent to Claude.
+Claude reads the lesson's Markdown file, the homework instructions and the student's work, and suggests a grade and a comment. It never grades on its own: the suggestion is shown only to the teacher, who confirms it with `PUT /submissions/:id/grade` and `fromAi: true`. PDFs are not sent to Claude. A page image larger than Claude takes is scaled down to 2576 px on its long edge for Claude only; the stored page the teacher sees is unchanged.
 
 | Endpoint | What it does |
 |---|---|

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { env } from '../config/env.js';
 import {
   FILE_URL_TTL_SECONDS,
+  FILE_URL_WINDOW_SECONDS,
   assertValidFileSignature,
   isValidFileSignature,
   signFileUrl,
@@ -13,7 +14,8 @@ import {
 
 const fileId = randomUUID();
 const now = new Date('2026-11-05T07:08:09.123Z');
-const expectedExp = Math.floor(now.getTime() / 1000) + 900;
+// 07:08:09 plus 15 minutes is 07:23:09, rounded up to the next multiple of 5 minutes.
+const expectedExp = Date.parse('2026-11-05T07:25:00Z') / 1000;
 
 function signedParams(id = fileId): { exp: string; sig: string } {
   const { searchParams } = new URL(signFileUrl(id, now).url, 'http://localhost');
@@ -39,7 +41,34 @@ describe('signFileUrl', () => {
   });
 
   it('mirrors exp in expiresAt as an ISO string with milliseconds', () => {
-    expect(signFileUrl(fileId, now).expiresAt).toBe('2026-11-05T07:23:09.000Z');
+    expect(signFileUrl(fileId, now).expiresAt).toBe('2026-11-05T07:25:00.000Z');
+  });
+
+  it('has a 5 minute window', () => {
+    expect(FILE_URL_WINDOW_SECONDS).toBe(5 * 60);
+  });
+
+  it('gives the same URL to every signing within one window, so browsers can cache the file', () => {
+    const url = signFileUrl(fileId, now).url;
+
+    expect(signFileUrl(fileId, new Date('2026-11-05T07:05:01.000Z')).url).toBe(url);
+    expect(signFileUrl(fileId, new Date('2026-11-05T07:10:00.999Z')).url).toBe(url);
+  });
+
+  it('moves to a new URL in the next window', () => {
+    expect(signFileUrl(fileId, new Date('2026-11-05T07:10:01.000Z')).expiresAt).toBe(
+      '2026-11-05T07:30:00.000Z',
+    );
+  });
+
+  it('keeps every URL valid for at least the TTL and less than the TTL plus the window', () => {
+    for (let offset = 0; offset < 2 * FILE_URL_WINDOW_SECONDS; offset += 1) {
+      const signedAt = secondsAfter(offset);
+      const validFor = (Date.parse(signFileUrl(fileId, signedAt).expiresAt) - signedAt.getTime()) / 1000;
+
+      expect(validFor).toBeGreaterThan(FILE_URL_TTL_SECONDS - 1);
+      expect(validFor).toBeLessThan(FILE_URL_TTL_SECONDS + FILE_URL_WINDOW_SECONDS);
+    }
   });
 });
 
@@ -83,7 +112,7 @@ describe('isValidFileSignature', () => {
   it('accepts a signature one second before it expires', () => {
     const { exp, sig } = signedParams();
 
-    expect(isValidFileSignature(fileId, exp, sig, secondsAfter(898))).toBe(true);
+    expect(isValidFileSignature(fileId, exp, sig, new Date((expectedExp - 1) * 1000))).toBe(true);
   });
 
   it('rejects a signature at and after its expiry', () => {
@@ -165,7 +194,7 @@ describe('assertValidFileSignature', () => {
   it('throws 403 FILE_URL_INVALID otherwise', () => {
     const { exp, sig } = signedParams();
 
-    expect(() => assertValidFileSignature(fileId, exp, sig, secondsAfter(901))).toThrow(
+    expect(() => assertValidFileSignature(fileId, exp, sig, new Date(expectedExp * 1000))).toThrow(
       expect.objectContaining({ code: 'FILE_URL_INVALID', status: 403 }),
     );
   });

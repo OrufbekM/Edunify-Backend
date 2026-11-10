@@ -14,6 +14,7 @@ import { logger } from '../../lib/logger.js';
 import { storage } from '../../storage/index.js';
 import { getOwnClass } from '../classes/service.js';
 import { lockSubmission } from '../submissions/service.js';
+import { fitForModel } from './images.js';
 import { model } from './model.js';
 import { buildRequest, readGrade, type Answer, type GradingInput, type Page } from './prompt.js';
 
@@ -250,7 +251,14 @@ async function pagesOf(submissionId: string): Promise<Page[]> {
     { bind: { submissionId }, type: QueryTypes.SELECT },
   );
 
-  return Promise.all(files.map(async (file) => ({ mime: file.mime, data: await storage.get(file.storageKey) })));
+  // One page at a time, so a submission holds at most one full-size original in memory.
+  const pages: Page[] = [];
+
+  for (const file of files) {
+    pages.push(await fitForModel({ mime: file.mime, data: await storage.get(file.storageKey) }));
+  }
+
+  return pages;
 }
 
 // What the model sees for one submission, or null when it is gone or no longer the latest

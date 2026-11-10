@@ -549,6 +549,19 @@ describe('rate limits', () => {
     expect((await login(newEmail(), 'wrong password!')).status).toBe(401);
   });
 
+  it('turns an IP away after 100 failed logins, whatever the emails, even with the right password', async () => {
+    const email = newEmail();
+    expect((await register({ email })).status).toBe(201);
+
+    // Every failure counts. A too-short password fails before the slow password check,
+    // which keeps 100 attempts fast.
+    for (let i = 0; i < 100; i += 1) {
+      expect((await login(newEmail(), 'short')).status).toBe(400);
+    }
+
+    expectError(await login(email), 429, 'RATE_LIMITED');
+  });
+
   it('gives the 11th registration from one IP 429 RATE_LIMITED', async () => {
     for (let i = 0; i < 10; i += 1) {
       expect((await register()).status).toBe(201);
