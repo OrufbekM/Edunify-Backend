@@ -67,21 +67,25 @@ const modelOutput = z.strictObject({
   comment: z.string().trim().max(COMMENT_MAX),
 });
 
-function text(value: string): Anthropic.Beta.BetaTextBlockParam {
-  return { type: 'text', text: value };
-}
-
 function tagged(tag: string, value: string, attributes = ''): string {
   return `<${tag}${attributes}>\n${value}\n</${tag}>`;
 }
 
-function answerBlocks(answer: Answer): Anthropic.Beta.BetaContentBlockParam[] {
+// What the model sees, in order, whichever provider grades: text, and page images. Each
+// provider turns these into its own request format (see providers.ts).
+export type PromptPart = { kind: 'text'; text: string } | { kind: 'image'; mime: Page['mime']; data: Buffer };
+
+function textPart(value: string): PromptPart {
+  return { kind: 'text', text: value };
+}
+
+function answerParts(answer: Answer): PromptPart[] {
   switch (answer.type) {
     case 'text':
-      return [text(tagged('student_answer', answer.text, ' type="text"'))];
+      return [textPart(tagged('student_answer', answer.text, ' type="text"'))];
     case 'code':
       return [
-        text(
+        textPart(
           tagged(
             'student_answer',
             [tagged('html', answer.html), tagged('css', answer.css), tagged('js', answer.js)].join('\n'),
@@ -91,37 +95,50 @@ function answerBlocks(answer: Answer): Anthropic.Beta.BetaContentBlockParam[] {
       ];
     default:
       return [
-        text(
+        textPart(
           tagged(
             'student_answer',
             `The answer is on the ${answer.pages.length} page image(s) that follow, in order.`,
             ` type="${answer.type}"`,
           ),
         ),
-        ...answer.pages.flatMap((page, index): Anthropic.Beta.BetaContentBlockParam[] => [
-          text(`Page ${index + 1}:`),
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: page.mime, data: page.data.toString('base64') },
-          },
+        ...answer.pages.flatMap((page, index): PromptPart[] => [
+          textPart(`Page ${index + 1}:`),
+          { kind: 'image', mime: page.mime, data: page.data },
         ]),
       ];
   }
 }
 
-// No temperature, top_p or top_k: current models reject them (plan, Phase 10). No thinking
-// or effort either, so each model runs its own default (adaptive thinking at medium effort
-// on claude-opus-5-5) and AI_MODEL can name any model that supports structured outputs.
-export function buildRequest(input: GradingInput, modelId: string): ModelRequest {
+// The lesson .md (if any), the instructions (text and/or .md), the answer (contract 9).
+export function promptParts(input: GradingInput): PromptPart[] {
   const instructions = [input.instructionsText, input.instructionsMarkdown]
     .filter((part): part is string => Boolean(part?.trim()))
     .join('\n\n');
-  const content: Anthropic.Beta.BetaContentBlockParam[] = [
-    ...(input.lessonMarkdown?.trim() ? [text(tagged('lesson_material', input.lessonMarkdown))] : []),
-    ...(instructions ? [text(tagged('homework_instructions', instructions))] : []),
-    ...answerBlocks(input.answer),
-    text('Suggest a grade and a comment for this answer.'),
+
+  return [
+    ...(input.lessonMarkdown?.trim() ? [textPart(tagged('lesson_material', input.lessonMarkdown))] : []),
+    ...(instructions ? [textPart(tagged('homework_instructions', instructions))] : []),
+    ...answerParts(input.answer),
+    textPart('Suggest a grade and a comment for this answer.'),
   ];
+}
+
+// The grade's JSON schema, for providers that take one (Gemini's own dialect is built in
+// providers.ts).
+export const GRADE_SCHEMA = OUTPUT_FORMAT.schema;
+
+// Claude's request. No temperature, top_p or top_k: current models reject them (plan,
+// Phase 10). No thinking or effort either, so each model runs its own default (adaptive
+// thinking at medium effort on claude-opus-5-5) and ANTHROPIC_MODEL can name any model that
+// supports structured outputs.
+export function buildRequest(input: GradingInput, modelId: string): ModelRequest {
+  const content = promptParts(input).map(
+    (part): Anthropic.Beta.BetaContentBlockParam =>
+      part.kind === 'text'
+        ? { type: 'text', text: part.text }
+        : { type: 'image', source: { type: 'base64', media_type: part.mime, data: part.data.toString('base64') } },
+  );
 
   return {
     model: modelId,
@@ -137,14 +154,9 @@ export type GradeOutcome =
   | { ok: true; value: Grade; comment: string }
   | { ok: false; reason: string };
 
-// Anything but a finished turn with valid JSON counts the submission as failed (contract 9):
-// a refusal (after any fallback also declined), a cut-off answer, or output off the schema.
-export function readGrade(response: ModelResponse): GradeOutcome {
-  if (response.stop_reason !== 'end_turn') {
-    return { ok: false, reason: `stop_reason ${String(response.stop_reason)}` };
-  }
-
-  const output = response.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('');
+// The same checks for every provider's answer: JSON, a value from 2 to 5, a comment of at
+// most 2000 characters after trimming, and nothing else.
+export function parseGrade(output: string): GradeOutcome {
   let json: unknown;
 
   try {
@@ -156,4 +168,14 @@ export function readGrade(response: ModelResponse): GradeOutcome {
   const parsed = modelOutput.safeParse(json);
 
   return parsed.success ? { ok: true, ...parsed.data } : { ok: false, reason: 'output does not match the schema' };
+}
+
+// Anything but a finished turn with valid JSON counts the submission as failed (contract 9):
+// a refusal (after any fallback also declined), a cut-off answer, or output off the schema.
+export function readGrade(response: ModelResponse): GradeOutcome {
+  if (response.stop_reason !== 'end_turn') {
+    return { ok: false, reason: `stop_reason ${String(response.stop_reason)}` };
+  }
+
+  return parseGrade(response.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join(''));
 }

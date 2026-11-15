@@ -17,6 +17,9 @@ export interface ImageLimits {
 
 const LIMITS: ImageLimits = { maxLongEdge: MAX_LONG_EDGE, maxBase64Length: MAX_BASE64_LENGTH };
 const QUALITY = 85;
+// The smallest long edge a page is shrunk to when it must fit a small share of a request; a
+// page of handwriting stays readable at this size.
+const MIN_LONG_EDGE = 1024;
 
 function base64Length(byteLength: number): number {
   return Math.ceil(byteLength / 3) * 4;
@@ -49,22 +52,26 @@ export async function fitForModel(page: Page, limits: ImageLimits = LIMITS): Pro
 
   // Re-encoding drops the EXIF orientation, so it is applied to the pixels first; otherwise
   // a phone photo would reach the model on its side.
-  const scaled = () =>
-    sharp(page.data).autoOrient().resize({
-      width: limits.maxLongEdge,
-      height: limits.maxLongEdge,
-      fit: 'inside',
-      withoutEnlargement: true,
-    });
+  const scaled = (edge: number) =>
+    sharp(page.data).autoOrient().resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true });
 
-  const sameType = await encodeAs(scaled(), page.mime).toBuffer();
+  const sameType = await encodeAs(scaled(limits.maxLongEdge), page.mime).toBuffer();
 
   if (base64Length(sameType.length) <= limits.maxBase64Length) {
     return { mime: page.mime, data: sameType };
   }
 
   // JPEG has no transparency and would fill it with black; drawings are made on white.
-  const jpeg = await scaled().flatten({ background: '#ffffff' }).jpeg({ quality: QUALITY }).toBuffer();
+  const asJpeg = (edge: number) => scaled(edge).flatten({ background: '#ffffff' }).jpeg({ quality: QUALITY }).toBuffer();
+  let edge = limits.maxLongEdge;
+  let jpeg = await asJpeg(edge);
+
+  // Still too large for this page's share of the request (several pages, a detailed photo):
+  // smaller still, a fifth at a time, but never below MIN_LONG_EDGE.
+  while (base64Length(jpeg.length) > limits.maxBase64Length && edge > MIN_LONG_EDGE) {
+    edge = Math.max(MIN_LONG_EDGE, Math.floor(edge * 0.8));
+    jpeg = await asJpeg(edge);
+  }
 
   return { mime: 'image/jpeg', data: jpeg };
 }

@@ -18,7 +18,9 @@ export default defineConfig({
       JWT_ACCESS_SECRET: 'test-only-jwt-access-secret-0123456789abcdef',
       FILE_URL_SECRET: 'test-only-file-url-secret-fedcba9876543210',
       STORAGE_DIR: join(tmpdir(), 'edunify-test-storage'),
-      AI_MODEL: 'test-model',
+      ANTHROPIC_MODEL: 'test-model',
+      GEMINI_MODEL: 'test-gemini',
+      OPENAI_MODEL: 'test-openai',
     },
   },
 });

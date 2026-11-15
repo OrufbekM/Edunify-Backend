@@ -1,22 +1,20 @@
 import { EventEmitter } from 'node:events';
 
-import Anthropic from '@anthropic-ai/sdk';
 import { QueryTypes, Transaction } from 'sequelize';
 import type { Logger } from 'pino';
 import { z } from 'zod';
 
-import { env } from '../../config/env.js';
 import { sequelize } from '../../db/index.js';
 import type { HomeworkType, JobStatus, SubmissionStatus } from '../../db/models/enums.js';
-import { AiJob, FileRecord, Lesson } from '../../db/models/index.js';
+import { AiJob, FileRecord, Homework, Lesson } from '../../db/models/index.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import { storage } from '../../storage/index.js';
 import { getOwnClass } from '../classes/service.js';
 import { lockSubmission } from '../submissions/service.js';
-import { fitForModel } from './images.js';
-import { model } from './model.js';
-import { buildRequest, readGrade, type Answer, type GradingInput, type Page } from './prompt.js';
+import { fitForModel, MAX_BASE64_LENGTH, MAX_LONG_EDGE } from './images.js';
+import type { Answer, GradingInput, Page } from './prompt.js';
+import { aiConfigured, gradeWith, providersFor } from './providers.js';
 
 // Contract 9: up to 3 submissions of a job at a time.
 const PARALLEL = 3;
@@ -111,7 +109,8 @@ export async function startAiGrading(
   lessonId: string,
   input: { submissionIds?: string[] },
 ): Promise<AiJobDto> {
-  if (!env.ANTHROPIC_API_KEY) {
+  // Nothing configured at all: no need to look at the lesson.
+  if (!aiConfigured()) {
     throw new AppError('AI_UNAVAILABLE');
   }
 
@@ -134,6 +133,13 @@ export async function startAiGrading(
 
     if (!lesson) {
       throw lessonNotFound();
+    }
+
+    // Text and page homework can go to different providers; this one may have none.
+    const homework = await Homework.findOne({ attributes: ['type'], where: { lessonId }, transaction });
+
+    if (homework && providersFor(homework.type).length === 0) {
+      throw new AppError('AI_UNAVAILABLE');
     }
 
     const active = await AiJob.findOne({
@@ -194,8 +200,8 @@ export async function requeueRunningJobs(): Promise<number> {
 
 // The oldest queued job. SKIP LOCKED: two workers never claim one job and never wait for
 // each other. A job that runs again starts its counters from zero (plan, Phase 10).
-async function claimJob(): Promise<{ id: string; submissionIds: string[] } | null> {
-  const [job] = await sequelize.query<{ id: string; submissionIds: string[] }>(
+async function claimJob(): Promise<{ id: string; lessonId: string; submissionIds: string[] } | null> {
+  const [job] = await sequelize.query<{ id: string; lessonId: string; submissionIds: string[] }>(
     `UPDATE ai_jobs
         SET status = 'running', completed = 0, failed = 0, updated_at = now()
       WHERE id = (SELECT id FROM ai_jobs
@@ -203,7 +209,7 @@ async function claimJob(): Promise<{ id: string; submissionIds: string[] } | nul
                    ORDER BY created_at, id
                    LIMIT 1
                      FOR UPDATE SKIP LOCKED)
-      RETURNING id, submission_ids AS "submissionIds"`,
+      RETURNING id, lesson_id AS "lessonId", submission_ids AS "submissionIds"`,
     { type: QueryTypes.SELECT },
   );
 
@@ -241,6 +247,15 @@ async function markdownOf(fileId: string | null): Promise<string | null> {
   return file?.mime === 'text/markdown' ? (await storage.get(file.storageKey)).toString('utf8') : null;
 }
 
+// Images in one request, base64-encoded, in total: under Gemini's 20 MB request limit, the
+// strictest of the three (Claude takes 32 MB, OpenAI 50 MB). Each page also stays within
+// Claude's 10 MB per image.
+const REQUEST_IMAGE_BUDGET = 18_000_000;
+
+export function pageBudget(pageCount: number): number {
+  return Math.min(MAX_BASE64_LENGTH, Math.floor(REQUEST_IMAGE_BUDGET / Math.max(1, pageCount)));
+}
+
 async function pagesOf(submissionId: string): Promise<Page[]> {
   const files = await sequelize.query<{ mime: Page['mime']; storageKey: string }>(
     `SELECT f.mime, f.storage_key AS "storageKey"
@@ -251,11 +266,13 @@ async function pagesOf(submissionId: string): Promise<Page[]> {
     { bind: { submissionId }, type: QueryTypes.SELECT },
   );
 
-  // One page at a time, so a submission holds at most one full-size original in memory.
+  // One page at a time, so a submission holds at most one full-size original in memory. All
+  // pages share one request, so each gets a share of a budget every provider accepts.
+  const limits = { maxLongEdge: MAX_LONG_EDGE, maxBase64Length: pageBudget(files.length) };
   const pages: Page[] = [];
 
   for (const file of files) {
-    pages.push(await fitForModel({ mime: file.mime, data: await storage.get(file.storageKey) }));
+    pages.push(await fitForModel({ mime: file.mime, data: await storage.get(file.storageKey) }, limits));
   }
 
   return pages;
@@ -331,15 +348,10 @@ async function storeSuggestion(
   });
 }
 
-function describe(err: unknown): Record<string, unknown> {
-  return err instanceof Anthropic.APIError
-    ? { status: err.status, message: err.message }
-    : { message: err instanceof Error ? err.message : String(err) };
-}
-
-// True when a suggestion was stored. Anything else (the submission gone or replaced, an API
-// error, a refusal, output off the schema) counts the submission as failed, and the job
-// carries on (contract 9).
+// True when a suggestion was stored. The homework type's provider is tried first, then the
+// fallback (contract 9, extended). Anything else (the submission gone or replaced, every
+// provider failing: an API error, a refusal, output off the schema) counts the submission
+// as failed, and the job carries on.
 async function gradeOne(submissionId: string, log: Logger): Promise<boolean> {
   try {
     const input = await gradingInput(submissionId);
@@ -349,33 +361,30 @@ async function gradeOne(submissionId: string, log: Logger): Promise<boolean> {
       return false;
     }
 
-    let response;
+    for (const provider of providersFor(input.answer.type)) {
+      const outcome = await gradeWith(provider, input);
 
-    try {
-      response = await model.send(buildRequest(input, env.AI_MODEL));
-    } catch (err) {
-      log.warn({ submissionId, error: describe(err) }, 'AI grading request failed');
-      return false;
+      if (!outcome.ok) {
+        log.warn({ submissionId, provider, reason: outcome.reason }, 'AI grading attempt failed');
+        continue;
+      }
+
+      const stored = await storeSuggestion(submissionId, {
+        value: outcome.value,
+        comment: outcome.comment,
+        createdAt: new Date().toISOString(),
+      });
+
+      if (stored) {
+        log.info({ submissionId, provider }, 'AI suggestion stored');
+      } else {
+        log.info({ submissionId }, 'AI suggestion dropped: the submission is gone or was replaced');
+      }
+
+      return stored;
     }
 
-    const outcome = readGrade(response);
-
-    if (!outcome.ok) {
-      log.warn({ submissionId, reason: outcome.reason }, 'AI grading output rejected');
-      return false;
-    }
-
-    const stored = await storeSuggestion(submissionId, {
-      value: outcome.value,
-      comment: outcome.comment,
-      createdAt: new Date().toISOString(),
-    });
-
-    if (!stored) {
-      log.info({ submissionId }, 'AI suggestion dropped: the submission is gone or was replaced');
-    }
-
-    return stored;
+    return false;
   } catch (err) {
     log.error({ err, submissionId }, 'AI grading of a submission failed');
     return false;
@@ -398,11 +407,15 @@ async function eachLimited<T>(items: T[], limit: number, work: (item: T) => Prom
 
 // Done once every submission was processed, failures included; failed only when the job
 // itself couldn't run, with `error` set. finished_at is set either way (contract 9).
-async function runJob(job: { id: string; submissionIds: string[] }): Promise<void> {
+async function runJob(job: { id: string; lessonId: string; submissionIds: string[] }): Promise<void> {
   const log = logger.child({ aiJobId: job.id });
 
   try {
-    if (!env.ANTHROPIC_API_KEY) {
+    // Keys can change between queueing and running (a restart with a new .env). A deleted
+    // homework leaves each submission to fail on its own.
+    const homework = await Homework.findOne({ attributes: ['type'], where: { lessonId: job.lessonId } });
+
+    if (homework && providersFor(homework.type).length === 0) {
       await finishJob(job.id, 'failed', 'AI grading is not configured');
       return;
     }

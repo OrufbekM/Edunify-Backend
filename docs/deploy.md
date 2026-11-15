@@ -33,13 +33,20 @@ DATABASE_URL=postgres://edunify:a-long-random-password@localhost:5432/edunify
 JWT_ACCESS_SECRET=...
 FILE_URL_SECRET=...
 STORAGE_DIR=/var/lib/edunify/storage
+AI_PROVIDER_TEXT=anthropic
+AI_PROVIDER_IMAGE=anthropic
+AI_FALLBACK_PROVIDER=
 ANTHROPIC_API_KEY=
-AI_MODEL=claude-opus-5-5
+GEMINI_API_KEY=
+OPENAI_API_KEY=
+ANTHROPIC_MODEL=claude-opus-5-5
+GEMINI_MODEL=
+OPENAI_MODEL=
 ```
 
 - `JWT_ACCESS_SECRET` and `FILE_URL_SECRET`: at least 32 characters each, and different from each other. Generate each with `openssl rand -base64 48`. Changing `JWT_ACCESS_SECRET` invalidates every access token at once (clients get new ones with their refresh cookie); changing `FILE_URL_SECRET` invalidates every file URL already handed out (clients fetch fresh ones).
 - `STORAGE_DIR`: an absolute path on the persistent disk, writable by the service user.
-- `ANTHROPIC_API_KEY`: optional. Left empty, AI grading answers `503 AI_UNAVAILABLE`.
+- AI grading: `AI_PROVIDER_TEXT` grades typed answers and `AI_PROVIDER_IMAGE` grades pages, each `anthropic`, `gemini` or `openai`; `AI_FALLBACK_PROVIDER` is tried when the first one fails. A provider without its key is off; a homework type with no provider left answers `503 AI_UNAVAILABLE`. Every provider named needs its `*_MODEL`. Use paid API keys in production: free tiers allow few requests a day (Gemini's allowed 20 for one model in testing) and may use what is sent to improve the provider's models, which matters for pupils' work.
 
 The process checks every variable on start and exits with a message if one is missing or invalid.
 
@@ -163,4 +170,4 @@ These depend on a real browser or a real API key, so the automated tests can't c
 
 1. Open a lesson whose file is a PDF, in Chrome and in Firefox, and check that it shows in the page. The backend sends helmet's default security headers with files, and their effect on the browsers' built-in PDF viewers inside an `<iframe>` hasn't been checked.
 2. Submit a drawing or photo homework with several large pages, to confirm the nginx limit above.
-3. If `ANTHROPIC_API_KEY` is set, run AI grading on one submission and check that a suggestion appears for the teacher.
+3. For each AI provider that has a key, run AI grading on one submission of a homework type it handles, and check that a suggestion appears for the teacher.

@@ -99,6 +99,27 @@ describe('fitForModel', () => {
     expect([...corner].every((channel) => channel >= 250)).toBe(true);
   });
 
+  it('keeps shrinking a detailed photo, down to 1024 px, until it fits a small share of a request', async () => {
+    const data = await noise(3000, 2000).png().toBuffer();
+    const limits: ImageLimits = { maxLongEdge: 2576, maxBase64Length: 1_500_000 };
+
+    const fitted = await fitForModel({ mime: 'image/png', data }, limits);
+    const { width, height } = await dimensions(fitted.data);
+
+    expect(fitted.mime).toBe('image/jpeg');
+    expect(Math.ceil(fitted.data.length / 3) * 4).toBeLessThanOrEqual(1_500_000);
+    expect(Math.max(width, height)).toBeLessThan(2576);
+    expect(Math.max(width, height)).toBeGreaterThanOrEqual(1024);
+  });
+
+  it('stops at 1024 px even when the page still does not fit', async () => {
+    const data = await noise(3000, 2000).png().toBuffer();
+
+    const fitted = await fitForModel({ mime: 'image/png', data }, { maxLongEdge: 2576, maxBase64Length: 10_000 });
+
+    expect(await dimensions(fitted.data)).toEqual({ width: 1024, height: 683 });
+  });
+
   it('rejects bytes that are not a readable image', async () => {
     const data = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
 

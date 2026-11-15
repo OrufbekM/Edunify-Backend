@@ -15,8 +15,9 @@ import { useTestDatabase } from '../../test/database.js';
 import { getFile, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 import { model, type ModelRequest, type ModelResponse } from './model.js';
-import { SYSTEM_PROMPT } from './prompt.js';
-import { onJobQueued, requeueRunningJobs, runNextJob } from './service.js';
+import { GRADE_SCHEMA, SYSTEM_PROMPT } from './prompt.js';
+import { http } from './providers.js';
+import { onJobQueued, pageBudget, requeueRunningJobs, runNextJob } from './service.js';
 
 useTestDatabase();
 
@@ -29,8 +30,19 @@ const JPEG = await blank(4, 3).jpeg().toBuffer();
 const WEBP = await blank(4, 3).webp().toBuffer();
 const PDF = Buffer.from('%PDF-1.4\nsecret pdf body\n%%EOF\n');
 
-const realKey = env.ANTHROPIC_API_KEY;
-const realModel = env.AI_MODEL;
+// Every AI setting a test may change, put back after each test.
+const AI_SETTINGS = [
+  'AI_PROVIDER_TEXT',
+  'AI_PROVIDER_IMAGE',
+  'AI_FALLBACK_PROVIDER',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_MODEL',
+  'GEMINI_MODEL',
+  'OPENAI_MODEL',
+] as const;
+const realSettings = Object.fromEntries(AI_SETTINGS.map((name) => [name, env[name]]));
 
 let teacher: TestUser;
 let student: TestUser;
@@ -48,9 +60,11 @@ beforeEach(async () => {
   ({ lessonId, homeworkId } = await addHomework('text', { instructionsText: 'Solve x + 2 = 5' }));
 });
 
+const realRetryDelays = http.retryDelaysMs;
+
 afterEach(() => {
-  env.ANTHROPIC_API_KEY = realKey;
-  env.AI_MODEL = realModel;
+  Object.assign(env, realSettings);
+  http.retryDelaysMs = realRetryDelays;
   vi.restoreAllMocks();
 });
 
@@ -500,7 +514,7 @@ describe('the worker', () => {
   });
 
   it('asks for refusal fallbacks on a model that takes them', async () => {
-    env.AI_MODEL = 'claude-opus-5-5';
+    env.ANTHROPIC_MODEL = 'claude-opus-5-5';
     await submitText('x = 3');
     const send = stubModel(() => reply({ value: 5, comment: 'Good' }));
     await startJob();
@@ -746,5 +760,272 @@ describe('the worker loop', () => {
     } finally {
       await worker.stop();
     }
+  });
+});
+
+describe('choosing the AI by homework type', () => {
+  // The parts of a Gemini or OpenAI request body these tests look at.
+  interface SentBody {
+    messages: Array<{ role: string; content: unknown }>;
+    contents: Array<{ parts: unknown[] }>;
+    systemInstruction?: unknown;
+    generationConfig?: unknown;
+  }
+  type Sent = { url: string; headers: Record<string, string>; body: SentBody };
+
+  const geminiReply = (output: unknown, finishReason = 'STOP', parts?: unknown[]) => ({
+    status: 200,
+    body: { candidates: [{ finishReason, content: { parts: parts ?? [{ text: JSON.stringify(output) }] } }] },
+  });
+  const openAiReply = (output: unknown, finishReason = 'stop', refusal: string | null = null) => ({
+    status: 200,
+    body: { choices: [{ finish_reason: finishReason, message: { content: JSON.stringify(output), refusal } }] },
+  });
+  const failure = (status: number, code: string) => ({ status, body: { error: { status: code, message: `${code} for the test` } } });
+
+  // Fakes Gemini and OpenAI: `answer` decides each reply from what was sent.
+  function stubHttp(answer: (sent: Sent) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>) {
+    const calls: Sent[] = [];
+    vi.spyOn(http, 'send').mockImplementation(async (url, headers, body) => {
+      const sent = { url, headers, body: body as SentBody };
+      calls.push(sent);
+      return answer(sent);
+    });
+    return calls;
+  }
+
+  async function submitPhoto(forHomework: string, pages: Array<[Buffer, string]>): Promise<string> {
+    let pending = request(app).post(`/api/v1/homeworks/${forHomework}/submissions`).set('Authorization', `Bearer ${student.token}`);
+    for (const [content, name] of pages) {
+      pending = pending.attach('pages', content, name);
+    }
+    const res = await pending;
+    expect(res.status).toBe(201);
+    return res.body.id as string;
+  }
+
+  async function suggestionOf(submissionId: string) {
+    return ((await Submission.findByPk(submissionId)) as Submission).aiSuggestion as { value: number; comment: string } | null;
+  }
+
+  beforeEach(() => {
+    env.GEMINI_API_KEY = 'gemini-test-key';
+    env.OPENAI_API_KEY = 'openai-test-key';
+    http.retryDelaysMs = [0, 0];
+  });
+
+  it('sends page homework to Gemini and typed homework to OpenAI, as configured', async () => {
+    env.AI_PROVIDER_IMAGE = 'gemini';
+    env.AI_PROVIDER_TEXT = 'openai';
+    const textSubmission = await submitText('x = 3');
+    const photo = await addHomework('photo', { title: 'Photo', instructionsText: 'Multiply 12 by 3' });
+    const photoSubmission = await submitPhoto(photo.homeworkId, [[JPEG, 'one.jpg'], [PNG, 'two.png']]);
+    const claude = stubModel(() => reply({ value: 2, comment: 'Claude' }));
+    const calls = stubHttp((sent) =>
+      sent.url.includes('googleapis') ? geminiReply({ value: 5, comment: '  From Gemini  ' }) : openAiReply({ value: 4, comment: 'From OpenAI' }),
+    );
+    await startJob();
+    await startJob(undefined, photo.lessonId);
+
+    await runNextJob();
+    await runNextJob();
+
+    expect(claude).not.toHaveBeenCalled();
+    await expect(suggestionOf(textSubmission)).resolves.toMatchObject({ value: 4, comment: 'From OpenAI' });
+    await expect(suggestionOf(photoSubmission)).resolves.toMatchObject({ value: 5, comment: 'From Gemini' });
+
+    const openAi = calls.find((call) => call.url.includes('openai')) as Sent;
+    expect(openAi.url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(openAi.headers).toEqual({ Authorization: 'Bearer openai-test-key' });
+    expect(openAi.body).toEqual({
+      model: 'test-openai',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<homework_instructions>\nSolve x + 2 = 5\n</homework_instructions>' },
+            { type: 'text', text: '<student_answer type="text">\nx = 3\n</student_answer>' },
+            { type: 'text', text: 'Suggest a grade and a comment for this answer.' },
+          ],
+        },
+      ],
+      response_format: { type: 'json_schema', json_schema: { name: 'grade', strict: true, schema: GRADE_SCHEMA } },
+    });
+
+    const gemini = calls.find((call) => call.url.includes('googleapis')) as Sent;
+    expect(gemini.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/test-gemini:generateContent');
+    expect(gemini.headers).toEqual({ 'x-goog-api-key': 'gemini-test-key' });
+    expect(gemini.body.systemInstruction).toEqual({ parts: [{ text: SYSTEM_PROMPT }] });
+    expect(gemini.body.generationConfig).toMatchObject({ responseMimeType: 'application/json', responseSchema: { type: 'OBJECT' } });
+    expect(gemini.body.contents[0]?.parts).toEqual([
+      { text: '<homework_instructions>\nMultiply 12 by 3\n</homework_instructions>' },
+      { text: '<student_answer type="photo">\nThe answer is on the 2 page image(s) that follow, in order.\n</student_answer>' },
+      { text: 'Page 1:' },
+      { inlineData: { mimeType: 'image/jpeg', data: JPEG.toString('base64') } },
+      { text: 'Page 2:' },
+      { inlineData: { mimeType: 'image/png', data: PNG.toString('base64') } },
+      { text: 'Suggest a grade and a comment for this answer.' },
+    ]);
+  });
+
+  it('sends page images to OpenAI as data URLs', async () => {
+    env.AI_PROVIDER_IMAGE = 'openai';
+    const photo = await addHomework('photo', { title: 'Photo' });
+    await submitPhoto(photo.homeworkId, [[WEBP, 'one.webp']]);
+    const calls = stubHttp(() => openAiReply({ value: 5, comment: 'Good' }));
+    await startJob(undefined, photo.lessonId);
+
+    await runNextJob();
+
+    expect(calls[0]?.body.messages[1]?.content).toContainEqual({
+      type: 'image_url',
+      image_url: { url: `data:image/webp;base64,${WEBP.toString('base64')}` },
+    });
+  });
+
+  it('falls back to the next provider when the first is out of quota, without retrying it', async () => {
+    env.AI_PROVIDER_IMAGE = 'gemini';
+    env.AI_FALLBACK_PROVIDER = 'anthropic';
+    const photo = await addHomework('photo', { title: 'Photo' });
+    const submissionId = await submitPhoto(photo.homeworkId, [[PNG, 'one.png']]);
+    const calls = stubHttp(() => failure(429, 'RESOURCE_EXHAUSTED'));
+    const claude = stubModel(() => reply({ value: 3, comment: 'From Claude' }));
+    const { id } = (await startJob(undefined, photo.lessonId)).body;
+
+    await runNextJob();
+
+    expect(calls).toHaveLength(1);
+    expect(claude).toHaveBeenCalledTimes(1);
+    await expect(suggestionOf(submissionId)).resolves.toMatchObject({ value: 3, comment: 'From Claude' });
+    expect(await jobRow(id)).toMatchObject({ status: 'done', completed: 1, failed: 0 });
+  });
+
+  it.each([
+    ['a refusal', openAiReply({ value: 5, comment: 'x' }, 'stop', 'I cannot help with that')],
+    ['a cut-off answer', openAiReply({ value: 5, comment: 'x' }, 'length')],
+    ['an answer off the schema', openAiReply({ value: 9, comment: 'x' })],
+    ['a server error after its retries', failure(500, 'INTERNAL')],
+  ])('falls back after %s', async (_case, openAi) => {
+    env.AI_PROVIDER_TEXT = 'openai';
+    env.AI_FALLBACK_PROVIDER = 'gemini';
+    const submissionId = await submitText('x = 3');
+    stubHttp((sent) => (sent.url.includes('openai') ? openAi : geminiReply({ value: 4, comment: 'From Gemini' })));
+    await startJob();
+
+    await runNextJob();
+
+    await expect(suggestionOf(submissionId)).resolves.toMatchObject({ value: 4, comment: 'From Gemini' });
+  });
+
+  it('skips a provider without a key and goes straight to the fallback', async () => {
+    env.AI_PROVIDER_IMAGE = 'gemini';
+    env.GEMINI_API_KEY = undefined;
+    env.AI_FALLBACK_PROVIDER = 'anthropic';
+    const photo = await addHomework('photo', { title: 'Photo' });
+    const submissionId = await submitPhoto(photo.homeworkId, [[PNG, 'one.png']]);
+    const calls = stubHttp(() => geminiReply({ value: 5, comment: 'x' }));
+    stubModel(() => reply({ value: 4, comment: 'From Claude' }));
+    await startJob(undefined, photo.lessonId);
+
+    await runNextJob();
+
+    expect(calls).toHaveLength(0);
+    await expect(suggestionOf(submissionId)).resolves.toMatchObject({ comment: 'From Claude' });
+  });
+
+  it('counts the submission as failed when every provider fails', async () => {
+    env.AI_PROVIDER_TEXT = 'gemini';
+    env.AI_FALLBACK_PROVIDER = 'openai';
+    const submissionId = await submitText('x = 3');
+    stubHttp((sent) => (sent.url.includes('googleapis') ? geminiReply({ value: 5, comment: 'x' }, 'SAFETY') : openAiReply({ value: 5, comment: 'x' }, 'length')));
+    const { id } = (await startJob()).body;
+
+    await runNextJob();
+
+    await expect(suggestionOf(submissionId)).resolves.toBeNull();
+    expect(await jobRow(id)).toMatchObject({ status: 'done', completed: 0, failed: 1 });
+  });
+
+  it('retries a dropped connection and a 503 before taking the answer', async () => {
+    env.AI_PROVIDER_TEXT = 'gemini';
+    const submissionId = await submitText('x = 3');
+    let call = 0;
+    const calls = stubHttp(() => {
+      call += 1;
+      if (call === 1) {
+        throw new TypeError('fetch failed');
+      }
+      return call === 2 ? failure(503, 'UNAVAILABLE') : geminiReply({ value: 5, comment: 'Third time' });
+    });
+    await startJob();
+
+    await runNextJob();
+
+    expect(calls).toHaveLength(3);
+    await expect(suggestionOf(submissionId)).resolves.toMatchObject({ comment: 'Third time' });
+  });
+
+  it('gives up on a provider after two retries', async () => {
+    env.AI_PROVIDER_TEXT = 'gemini';
+    await submitText('x = 3');
+    const calls = stubHttp(() => failure(503, 'UNAVAILABLE'));
+    const { id } = (await startJob()).body;
+
+    await runNextJob();
+
+    expect(calls).toHaveLength(3);
+    expect(await jobRow(id)).toMatchObject({ completed: 0, failed: 1 });
+  });
+
+  it("reads Gemini's answer from its text, leaving out thought parts", async () => {
+    env.AI_PROVIDER_TEXT = 'gemini';
+    const submissionId = await submitText('x = 3');
+    stubHttp(() =>
+      geminiReply(null, 'STOP', [{ thought: true, text: 'Let me think: 5 - 2 = 3.' }, { text: '{"value": 5, "comment": "Correct"}' }]),
+    );
+    await startJob();
+
+    await runNextJob();
+
+    await expect(suggestionOf(submissionId)).resolves.toMatchObject({ value: 5, comment: 'Correct' });
+  });
+
+  it('answers 503 for a homework type whose providers have no key, and 202 for the other', async () => {
+    env.AI_PROVIDER_TEXT = 'openai';
+    env.OPENAI_API_KEY = undefined;
+    await submitText('x = 3');
+    const photo = await addHomework('photo', { title: 'Photo' });
+    await submitPhoto(photo.homeworkId, [[PNG, 'one.png']]);
+
+    expectError(await startJob(), 503, 'AI_UNAVAILABLE');
+    expect((await startJob(undefined, photo.lessonId)).status).toBe(202);
+  });
+
+  it('answers 503 before looking at the lesson when no provider has a key', async () => {
+    env.ANTHROPIC_API_KEY = undefined;
+    env.GEMINI_API_KEY = undefined;
+    env.OPENAI_API_KEY = undefined;
+    env.AI_FALLBACK_PROVIDER = 'gemini';
+
+    expectError(await startJob(undefined, randomUUID()), 503, 'AI_UNAVAILABLE');
+  });
+
+  it("fails a queued job whose homework type lost its provider's key before it ran", async () => {
+    env.AI_PROVIDER_IMAGE = 'gemini';
+    const photo = await addHomework('photo', { title: 'Photo' });
+    await submitPhoto(photo.homeworkId, [[PNG, 'one.png']]);
+    const calls = stubHttp(() => geminiReply({ value: 5, comment: 'x' }));
+    const { id } = (await startJob(undefined, photo.lessonId)).body;
+    env.GEMINI_API_KEY = undefined;
+
+    await runNextJob();
+
+    expect(calls).toHaveLength(0);
+    expect(await jobRow(id)).toMatchObject({ status: 'failed', error: 'AI grading is not configured' });
+  });
+
+  it('shares an 18 MB image budget between the pages of one request, at most 10 MB a page', () => {
+    expect([1, 2, 3, 9].map(pageBudget)).toEqual([10_000_000, 9_000_000, 6_000_000, 2_000_000]);
   });
 });

@@ -32,8 +32,11 @@ npm run dev                 # http://localhost:3000, restarts on file changes
 | `JWT_ACCESS_SECRET` | at least 32 characters |
 | `FILE_URL_SECRET` | at least 32 characters, different from the JWT secret |
 | `STORAGE_DIR` | absolute path where uploaded files are kept |
-| `ANTHROPIC_API_KEY` | optional; without it AI grading answers `503 AI_UNAVAILABLE` |
-| `AI_MODEL` | the Claude model used for AI grading, for example `claude-opus-5-5` |
+| `AI_PROVIDER_TEXT` | the AI that grades typed answers (`text`, `code`): `anthropic`, `gemini` or `openai`; default `anthropic` |
+| `AI_PROVIDER_IMAGE` | the AI that grades pages (`draw`, `math`, `photo`); default `anthropic` |
+| `AI_FALLBACK_PROVIDER` | optional; tried when the first AI fails (overloaded, out of quota, a bad answer) |
+| `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY` | optional; a provider without its key is off, and a homework type with no provider left answers `503 AI_UNAVAILABLE` |
+| `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `OPENAI_MODEL` | the model of each provider in use, for example `claude-opus-5-5`; required for every provider named above |
 
 The server refuses to start if a value is missing or invalid, and says which.
 
@@ -442,7 +445,9 @@ Both show only lessons that have homework, as columns in outline order, with one
 
 ### AI grading (teachers)
 
-Claude reads the lesson's Markdown file, the homework instructions and the student's work, and suggests a grade and a comment. It never grades on its own: the suggestion is shown only to the teacher, who confirms it with `PUT /submissions/:id/grade` and `fromAi: true`. PDFs are not sent to Claude. A page image larger than Claude takes is scaled down to 2576 px on its long edge for Claude only; the stored page the teacher sees is unchanged.
+An AI reads the lesson's Markdown file, the homework instructions and the student's work, and suggests a grade and a comment. It never grades on its own: the suggestion is shown only to the teacher, who confirms it with `PUT /submissions/:id/grade` and `fromAi: true`. PDFs are not sent to the AI.
+
+Which AI grades depends on the homework type and the server's settings: typed answers (`text`, `code`) go to `AI_PROVIDER_TEXT`, pages (`draw`, `math`, `photo`) to `AI_PROVIDER_IMAGE`, each one Claude, Gemini or OpenAI. If that AI fails, `AI_FALLBACK_PROVIDER` gets the same request. Every AI gets the same instructions and its answer goes through the same checks, so the API behaves the same whichever graded. Page images are scaled down for the AI only (at most 2576 px on the long edge, and smaller when a submission has many large pages); the stored page the teacher sees is unchanged.
 
 | Endpoint | What it does |
 |---|---|
