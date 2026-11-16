@@ -15,6 +15,7 @@ const ERRORS = {
   EMAIL_TAKEN: { status: 409, message: 'Email already registered' },
   CATEGORY_NAME_TAKEN: { status: 409, message: 'Teacher already has a category with this name' },
   CATEGORY_NOT_EMPTY: { status: 409, message: 'Category still contains classes' },
+  INVALID_STATUS_TRANSITION: { status: 409, message: 'The requested account status change is not allowed' },
   STUDENT_ID_IN_USE: { status: 409, message: 'That account already has a row in this class' },
   HOMEWORK_TYPE_LOCKED: { status: 409, message: 'Type cannot change once submissions exist' },
   SUBMISSION_NOT_LATEST: { status: 409, message: 'Only the latest version can be graded' },

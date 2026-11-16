@@ -8,6 +8,7 @@ import { app } from './app.js';
 import { env } from './config/env.js';
 import { AiJob } from './db/models/index.js';
 import { generalLimiter, resetRateLimits } from './middleware/rateLimit.js';
+import { adminRouter } from './modules/admin/routes.js';
 import { aiRouter } from './modules/ai/routes.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
@@ -44,6 +45,8 @@ interface Fixture {
   submissionId: string;
   notificationId: string;
   jobId: string;
+  // An account for the admin routes to act on.
+  userId: string;
 }
 
 type Caller = 'owner' | 'student' | 'otherTeacher' | 'otherStudent' | 'admin';
@@ -52,7 +55,8 @@ type Send = (user: TestUser | null, f: Fixture) => request.Test;
 interface Case {
   // Who may call it at all. 'both': teachers and students, on something of the class.
   // 'any': teachers and students, each for their own things. 'everyone': the admin too.
-  role: 'teacher' | 'student' | 'both' | 'any' | 'everyone';
+  // 'admin': the admin only.
+  role: 'teacher' | 'student' | 'both' | 'any' | 'everyone' | 'admin';
   // The fixture value the access check is about: put a random id there and the rightful
   // caller gets the "doesn't exist" answer that strangers must also get.
   resource?: keyof Fixture;
@@ -341,6 +345,24 @@ const MATRIX: Record<string, Case> = {
     ok: [['owner', 204]],
     send: (u, f) => call('post', `${V1}/notifications/${f.notificationId}/read`, u),
   },
+
+  'GET /api/v1/admin/users': {
+    role: 'admin',
+    ok: [['admin', 200]],
+    send: (u) => call('get', `${V1}/admin/users`, u),
+  },
+  'PATCH /api/v1/admin/users/:id/status': {
+    role: 'admin',
+    resource: 'userId',
+    ok: [['admin', 200]],
+    send: (u, f) => call('patch', `${V1}/admin/users/${f.userId}/status`, u, { status: 'blocked' }),
+  },
+  'POST /api/v1/admin/users/:id/reset-password': {
+    role: 'admin',
+    resource: 'userId',
+    ok: [['admin', 200]],
+    send: (u, f) => call('post', `${V1}/admin/users/${f.userId}/reset-password`, u),
+  },
 };
 
 // Open on purpose: the auth routes work from the refresh cookie or no credentials at all, and
@@ -370,6 +392,7 @@ const MOUNTS: Array<[string, Router]> = [
   ['/api/v1/student', studentRouter],
   ['/api/v1/files', filesRouter],
   ['/api/v1/notifications', notificationsRouter],
+  ['/api/v1/admin', adminRouter],
 ];
 
 interface RouteLayer {
@@ -448,6 +471,7 @@ async function buildFixture(): Promise<Fixture> {
     submissionId: submission.body.id,
     notificationId: notification.id,
     jobId: job.id,
+    userId: otherStudent.id,
   };
 }
 
@@ -463,6 +487,9 @@ function strangers(role: Case['role']): Caller[] {
     case 'any':
     case 'everyone':
       return ['student', 'otherTeacher', 'otherStudent'];
+    case 'admin':
+      // There is only one admin.
+      return [];
   }
 }
 
@@ -477,6 +504,8 @@ function wrongRole(role: Case['role']): Caller[] {
       return ['admin'];
     case 'everyone':
       return [];
+    case 'admin':
+      return ['owner', 'student', 'otherTeacher', 'otherStudent'];
   }
 }
 

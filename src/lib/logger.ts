@@ -3,7 +3,15 @@ import { pinoHttp, type HttpLogger } from 'pino-http';
 
 import { env } from '../config/env.js';
 
-const PASSWORD_FIELDS = ['password', 'currentPassword', 'newPassword', 'passwordHash'];
+const PASSWORD_FIELDS = [
+  'password',
+  'confirmPassword',
+  'currentPassword',
+  'newPassword',
+  'confirmNewPassword',
+  'temporaryPassword',
+  'passwordHash',
+];
 
 export const redactPaths = [
   // pino-http logs request and response headers, which carry the access and refresh tokens.

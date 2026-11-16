@@ -115,6 +115,13 @@ async function revokeTokens(
   );
 }
 
+// Signs the user out everywhere: no refresh token of theirs works any more. An access token
+// already handed out lives on for up to 15 minutes, so callers that must stop the user at
+// once also change something the account check reads (status, mustChangePassword).
+export async function endAllSessions(userId: string, transaction?: Transaction): Promise<void> {
+  await revokeTokens({ userId }, transaction);
+}
+
 async function findUser(userId: string): Promise<User> {
   const user = await User.findByPk(userId);
 

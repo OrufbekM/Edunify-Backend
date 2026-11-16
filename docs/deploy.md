@@ -182,5 +182,5 @@ These depend on a real browser or a real API key, so the automated tests can't c
 
 1. Open a lesson whose file is a PDF, in Chrome and in Firefox, and check that it shows in the page. The backend sends helmet's default security headers with files, and their effect on the browsers' built-in PDF viewers inside an `<iframe>` hasn't been checked.
 2. Submit a drawing or photo homework with several large pages, to confirm the nginx limit above.
-3. Sign in as the admin at `POST /api/v1/auth/admin/login` and check that a teacher who signs up gets `403 ACCOUNT_PENDING` on `GET /api/v1/categories`.
+3. Sign in as the admin at `POST /api/v1/auth/admin/login`. Check that a teacher who signs up gets `403 ACCOUNT_PENDING` on `GET /api/v1/categories`, shows up in `GET /api/v1/admin/users?status=pending`, and gets in once approved with `PATCH /api/v1/admin/users/:id/status`.
 4. If AI grading is on: for each AI provider that has a key, run AI grading on one submission of a homework type it handles, and check that a suggestion appears for the teacher.

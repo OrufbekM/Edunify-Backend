@@ -21,6 +21,8 @@ describe('redactPaths', () => {
     ['a password', { password: 'SECRET' }],
     ['a current password', { currentPassword: 'SECRET' }],
     ['a new password', { newPassword: 'SECRET' }],
+    ['a password confirmation', { confirmPassword: 'SECRET', confirmNewPassword: 'SECRET' }],
+    ['an admin-issued temporary password', { temporaryPassword: 'SECRET' }],
     ['a password inside an object', { body: { password: 'SECRET' } }],
     ['a password in a request body', { req: { body: { password: 'SECRET' } } }],
     ['a stored password hash', { user: { passwordHash: 'SECRET' } }],

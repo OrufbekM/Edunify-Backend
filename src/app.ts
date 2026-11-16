@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { httpLogger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { generalLimiter } from './middleware/rateLimit.js';
+import { adminRouter } from './modules/admin/routes.js';
 import { aiRouter } from './modules/ai/routes.js';
 import { authRouter, meRouter } from './modules/auth/routes.js';
 import { categoriesRouter } from './modules/categories/routes.js';
@@ -48,6 +49,7 @@ app.use('/api/v1/classes', classesRouter);
 app.use('/api/v1/student', studentRouter);
 app.use('/api/v1/files', filesRouter);
 app.use('/api/v1/notifications', notificationsRouter);
+app.use('/api/v1/admin', adminRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

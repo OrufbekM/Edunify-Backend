@@ -70,7 +70,7 @@ CI runs typecheck, lint, the tests and the build on every push to `main` and `de
 ### Basics
 
 - Every path starts with `/api/v1`. Requests and responses are JSON with `camelCase` keys, except the file uploads, which are `multipart/form-data`.
-- A single resource comes back as itself, with no wrapper. Lists come back as `{ "items": [...] }`. There is no pagination; the [caps](#limits) keep lists small.
+- A single resource comes back as itself, with no wrapper. Lists come back as `{ "items": [...] }`. There is no pagination except in the admin's user list; the [caps](#limits) keep the other lists small.
 - `201` means created, `200` read or updated, `202` a job was started, and `204` (with an empty body) a delete or a mark-read.
 - Ids are UUIDs. Times are ISO 8601 in UTC with milliseconds, like `2026-11-05T07:08:09.123Z`.
 - Request bodies are strict: an unknown field is a `400 VALIDATION_ERROR`.
@@ -88,6 +88,7 @@ Each endpoint below lists who may call it:
 | S | students only; everyone else gets `403 FORBIDDEN` |
 | T, S | both, each seeing only their own; the admin gets `403 FORBIDDEN` |
 | Any | any signed-in user, the admin included |
+| AD | the admin only; everyone else gets `403 FORBIDDEN` |
 
 Teachers only ever see their own classes. Students only see a class while they have an **active link** to it, which takes two steps in either order:
 
@@ -113,6 +114,8 @@ The server reads the account on every call, so these take effect at once, even f
 1. **Blocked** by the admin: every call answers `403 ACCOUNT_BLOCKED`, `/me` and `POST /auth/refresh` included. Sign the user out and say the account is blocked.
 2. **Password reset** by the admin (`user.mustChangePassword` is `true`): every call but `/me` and `/me/password` answers `403 PASSWORD_CHANGE_REQUIRED`. Show the "Set new password" screen; `POST /me/password` clears it.
 3. **Pending** (a new teacher, `user.status` is `pending`): every call but `/me` and `/me/password` answers `403 ACCOUNT_PENDING`. Show "Waiting for Edunify admin approval" and poll `GET /me` every 30 seconds until `status` is `active`.
+
+The admin changes these through the [admin endpoints](#admin-the-admin-only): approving, rejecting, blocking and unblocking accounts, and issuing a temporary password to someone who forgot theirs.
 
 Students start `active`. Nothing is ever sent by email or SMS: there is no email check and no self-service password reset.
 
@@ -143,6 +146,7 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | `EMAIL_TAKEN` | 409 | The email is already registered |
 | `CATEGORY_NAME_TAKEN` | 409 | You already have a category with this name (case doesn't matter) |
 | `CATEGORY_NOT_EMPTY` | 409 | The category still has classes |
+| `INVALID_STATUS_TRANSITION` | 409 | That account status change isn't allowed (see the admin endpoints) |
 | `STUDENT_ID_IN_USE` | 409 | That student already has a row in this class |
 | `HOMEWORK_TYPE_LOCKED` | 409 | The homework type can't change once there are submissions |
 | `SUBMISSION_NOT_LATEST` | 409 | Only the latest version of a submission can be graded |
@@ -213,7 +217,8 @@ The type is checked by the file's extension and its content, not by the MIME typ
 ## Data shapes
 
 ```ts
-type Role = 'teacher' | 'student'
+type Role = 'teacher' | 'student' | 'admin'
+type UserStatus = 'pending' | 'active' | 'blocked'
 type HomeworkType = 'text' | 'draw' | 'math' | 'code' | 'photo'   // math works exactly like draw
 type SubmissionStatus = 'submitted' | 'denied' | 'graded'
 type CellStatus = 'empty' | 'submitted' | 'denied' | 'graded'    // 'empty' = nothing handed in yet
@@ -224,14 +229,14 @@ type Grade = 2 | 3 | 4 | 5
 
 interface User {
   id: string
-  role: 'teacher' | 'student' | 'admin'
+  role: Role
   firstName: string
   lastName: string
   email: string | null         // teachers and students; null for the admin
   phone: string | null         // teachers only, like +998901234567
   login: string | null         // the admin only
   publicId: string | null      // students only
-  status: 'pending' | 'active' | 'blocked'   // teachers start pending
+  status: UserStatus           // teachers start pending
   mustChangePassword: boolean  // true after an admin password reset
   createdAt: string
 }
@@ -501,6 +506,16 @@ Teachers get `submitted` when a student hands something in; students get `graded
 |---|---|---|
 | `GET /files/:id?exp=&sig=` | Signed URL | The file's bytes, with the right `Content-Type`. Use the `url` from a `FileRef` as it is. Errors: `FILE_URL_INVALID` (expired or altered link), `NOT_FOUND` (the file was removed). |
 
+### Admin (the admin only)
+
+The admin sees accounts only, never classes, lessons or students' work. Every endpoint here works on teachers and students; the admin's own id answers `404 NOT_FOUND`, like an id that doesn't exist.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /admin/users?role=&status=&q=&limit=&offset=` | Teachers and students, newest first: `200 { items: User[], total }`. All filters are optional: `role` is `teacher` or `student`; `status` is `pending`, `active` or `blocked`; `q` finds text in the first name, last name, whole name, email or phone, ignoring case (a phone matches however it is typed, with spaces or brackets). `limit` is 1 to 100 (default 50), `offset` 0 or more (default 0); `total` counts every match. A student's `publicId` is always `null` here. |
+| `PATCH /admin/users/:id/status` | Body `{ status }`, `active` or `blocked`. Allowed: `pending` to `active` (approve) or `blocked` (reject), `active` to `blocked`, `blocked` to `active`. Blocking signs the user out everywhere at once. Returns `200 User`. Error: `INVALID_STATUS_TRANSITION` for anything else, the same status included. |
+| `POST /admin/users/:id/reset-password` | No body. Returns `200 { temporaryPassword }`: 12 characters without look-alikes (no `0 O 1 l I`). It is shown only this once and never stored, so show it with a Copy button. The user is signed out everywhere, signs in with it, and must choose a new password (`POST /me/password`) before anything else works. |
+
 ## A full example
 
 From an empty class to a grade, with `curl` against a local server. `jq` pulls fields out of the responses.
@@ -510,12 +525,15 @@ API=http://localhost:3000/api/v1
 JSON='Content-Type: application/json'
 
 # A teacher signs up. The access token goes in a variable, the refresh cookie in a cookie jar.
-T=$(curl -s -c teacher.jar -X POST $API/auth/register -H "$JSON" \
-  -d '{"role":"teacher","firstName":"Teacher","lastName":"One","phone":"+998901234567","email":"teacher@example.com","password":"long-password-1","confirmPassword":"long-password-1"}' | jq -r .accessToken)
+TEACHER=$(curl -s -c teacher.jar -X POST $API/auth/register -H "$JSON" \
+  -d '{"role":"teacher","firstName":"Teacher","lastName":"One","phone":"+998901234567","email":"teacher@example.com","password":"long-password-1","confirmPassword":"long-password-1"}')
+T=$(echo "$TEACHER" | jq -r .accessToken)
 
-# The teacher is pending until the admin approves. There is no admin API yet (plan, Phase 13),
-# so approve by hand in the database:
-psql "$DATABASE_URL" -c "UPDATE users SET status = 'active' WHERE email = 'teacher@example.com'"
+# The teacher is pending until the admin approves. (The admin was made with npm run seed:admin.)
+A=$(curl -s -X POST $API/auth/admin/login -H "$JSON" \
+  -d '{"login":"edunify_admin","password":"the-admin-password"}' | jq -r .accessToken)
+curl -s -X PATCH $API/admin/users/$(echo "$TEACHER" | jq -r .user.id)/status \
+  -H "Authorization: Bearer $A" -H "$JSON" -d '{"status":"active"}'
 
 # A student signs up and gets a public ID to give the teacher.
 STUDENT=$(curl -s -X POST $API/auth/register -H "$JSON" \
