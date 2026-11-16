@@ -19,8 +19,9 @@ import * as lessons from './service.js';
 // each route, not on the router, so requests for other paths pass through untouched.
 export const lessonsRouter = Router();
 
-// Routes with no requireRole take teachers and students both; the service decides what
-// each may see (contract 5).
+// Teachers and students both, never the admin; the service decides what each may see
+// (contract 5).
+const teacherOrStudent = requireRole('teacher', 'student');
 const teacherOnly = requireRole('teacher');
 
 // Runs before multer, so nobody can make the server buffer up to 20 MB for a lesson they
@@ -39,7 +40,7 @@ function checkBeforeUpload(
 const ownLessonFirst = checkBeforeUpload(lessons.assertOwnLesson);
 const ownHomeworkFirst = checkBeforeUpload(lessons.assertOwnHomework);
 
-lessonsRouter.get('/classes/:classId/outline', requireAuth, generalLimiter, async (req, res) => {
+lessonsRouter.get('/classes/:classId/outline', requireAuth, generalLimiter, teacherOrStudent, async (req, res) => {
   const { classId } = classParams.parse(req.params);
   emptyQuerySchema.parse(req.query);
 
@@ -74,7 +75,7 @@ lessonsRouter.post('/classes/:classId/lessons', requireAuth, generalLimiter, tea
   res.status(201).json(await lessons.createLesson(getAuth(req).id, classId, body));
 });
 
-lessonsRouter.get('/lessons/:id', requireAuth, generalLimiter, async (req, res) => {
+lessonsRouter.get('/lessons/:id', requireAuth, generalLimiter, teacherOrStudent, async (req, res) => {
   const { id } = idParamsSchema.parse(req.params);
   emptyQuerySchema.parse(req.query);
 

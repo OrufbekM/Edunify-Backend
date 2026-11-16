@@ -19,10 +19,14 @@ afterEach(() => {
 async function createFile(): Promise<FileRecord> {
   const owner = await User.create({
     role: 'teacher',
-    fullName: 'Teacher',
+    firstName: 'Test',
+    lastName: 'Teacher',
     email: `${randomUUID()}@example.com`,
+    phone: '+998901234567',
+    login: null,
     passwordHash: 'hash',
     publicId: null,
+    status: 'active',
   });
 
   return FileRecord.create({

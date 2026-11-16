@@ -24,10 +24,14 @@ function selectOne<T extends object>(sql: string): Promise<T | null> {
 function createStudent(publicId: string, email = `${randomUUID()}@example.com`): Promise<User> {
   return User.create({
     role: 'student',
-    fullName: 'Student',
+    firstName: 'Test',
+    lastName: 'Student',
     email,
+    phone: null,
+    login: null,
     passwordHash: 'hash',
     publicId,
+    status: 'active',
   });
 }
 
@@ -64,6 +68,56 @@ describe('test database', () => {
   });
 });
 
+describe('users table checks (contract 4)', () => {
+  type Row = Record<string, string | null>;
+
+  const valid: Record<'teacher' | 'student' | 'admin', Row> = {
+    teacher: { role: 'teacher', email: 't@example.com', phone: '+998901234567', login: null, public_id: null, status: 'pending' },
+    student: { role: 'student', email: 's@example.com', phone: null, login: null, public_id: 'abcd1234', status: 'active' },
+    admin: { role: 'admin', email: null, phone: null, login: 'edunify_admin', public_id: null, status: 'active' },
+  };
+
+  function insert(row: Row) {
+    return sequelize.query(
+      `INSERT INTO users (role, first_name, last_name, email, phone, login, password_hash, public_id, status)
+       VALUES (:role, 'First', 'Last', :email, :phone, :login, 'hash', :public_id, :status)`,
+      { replacements: row },
+    );
+  }
+
+  it('accepts each role in its own shape', async () => {
+    for (const row of Object.values(valid)) {
+      await insert(row);
+    }
+
+    await expect(User.count()).resolves.toBe(3);
+  });
+
+  it.each([
+    ['a teacher without a phone', { ...valid.teacher, phone: null }],
+    ['a teacher with a publicId', { ...valid.teacher, public_id: 'abcd1234' }],
+    ['a teacher with a login', { ...valid.teacher, login: 'teacher_login' }],
+    ['a student without a publicId', { ...valid.student, public_id: null }],
+    ['a student with a phone', { ...valid.student, phone: '+998901234567' }],
+    ['a student without an email', { ...valid.student, email: null }],
+    ['a pending student', { ...valid.student, status: 'pending' }],
+    ['an admin without a login', { ...valid.admin, login: null }],
+    ['an admin with an email', { ...valid.admin, email: 'a@example.com' }],
+    ['a pending admin', { ...valid.admin, status: 'pending' }],
+  ])('rejects %s', async (_name, row) => {
+    await expect(insert(row)).rejects.toThrow(/violates check constraint/);
+  });
+
+  it('allows only one admin', async () => {
+    await insert(valid.admin);
+
+    // Sequelize words a unique violation as 'Validation error'; the constraint name is on it.
+    await expect(insert({ ...valid.admin, login: 'second_admin' })).rejects.toMatchObject({
+      parent: { constraint: 'users_one_admin_uq' },
+    });
+  });
+});
+
 describe('Sequelize logging', () => {
   it('goes through pino', async () => {
     const debug = vi.spyOn(logger, 'debug');
@@ -95,10 +149,14 @@ describe('insertWithPublicId on real tables', () => {
   it('retries a collision on classes.public_id', async () => {
     const teacher = await User.create({
       role: 'teacher',
-      fullName: 'Teacher',
+      firstName: 'Test',
+      lastName: 'Teacher',
       email: 'teacher@example.com',
+      phone: '+998901234567',
+      login: null,
       passwordHash: 'hash',
       publicId: null,
+      status: 'active',
     });
     const category = await Category.create({ teacherId: teacher.id, name: 'Algebra' });
     const createClass = (publicId: string) =>
@@ -144,10 +202,14 @@ describe('insertWithPublicId on real tables', () => {
         await User.create(
           {
             role: 'student',
-            fullName: 'Student',
+            firstName: 'Test',
+            lastName: 'Student',
             email: `${randomUUID()}@example.com`,
+            phone: null,
+            login: null,
             passwordHash: 'hash',
             publicId: attempts === 1 ? 'taken000' : publicId,
+            status: 'active',
           },
           { transaction },
         );

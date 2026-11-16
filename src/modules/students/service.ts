@@ -255,7 +255,7 @@ export async function listMyClasses(
     `SELECT c.id,
             c.subject,
             c.name,
-            t.full_name AS "teacherName",
+            t.first_name || ' ' || t.last_name AS "teacherName",
             cs.id AS "classStudentId"
        FROM class_students cs
        JOIN class_claims cc

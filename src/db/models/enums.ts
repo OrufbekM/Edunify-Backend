@@ -1,8 +1,12 @@
 // Values must match contract section 3 exactly; the migrations repeat them as literals
 // so that a historical migration never changes when this file does.
 
-export const ROLES = ['teacher', 'student'] as const;
+export const ROLES = ['teacher', 'student', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
+
+// Teachers start pending until the admin approves them; students and the admin start active.
+export const USER_STATUSES = ['pending', 'active', 'blocked'] as const;
+export type UserStatus = (typeof USER_STATUSES)[number];
 
 // math is rendered and stored exactly like draw.
 export const HOMEWORK_TYPES = ['text', 'draw', 'math', 'code', 'photo'] as const;

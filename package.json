@@ -12,6 +12,8 @@
     "migrate:reset": "tsx --env-file=.env src/db/migrate.ts reset",
     "migrate:status": "tsx --env-file=.env src/db/migrate.ts status",
     "migrate:prod": "node dist/db/migrate.js up",
+    "seed:admin": "tsx --env-file=.env src/db/seedAdmin.ts",
+    "seed:admin:prod": "node dist/db/seedAdmin.js",
     "test": "vitest run",
     "lint": "eslint ."
   },

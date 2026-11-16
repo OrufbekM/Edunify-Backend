@@ -2,14 +2,16 @@ import { Router, type CookieOptions, type Request, type Response } from 'express
 
 import { env } from '../../config/env.js';
 import { REFRESH_TOKEN_TTL_SECONDS } from '../../lib/tokens.js';
-import { getAuth, requireAuth } from '../../middleware/auth.js';
+import { getAuth, requireSignedIn } from '../../middleware/auth.js';
 import {
+  adminLoginLimiter,
   generalLimiter,
   loginFailureLimiter,
   loginLimiter,
   registerLimiter,
 } from '../../middleware/rateLimit.js';
 import {
+  adminLoginBody,
   changePasswordBody,
   loginBody,
   noBody,
@@ -58,6 +60,14 @@ authRouter.post('/login', loginLimiter, loginFailureLimiter, async (req, res) =>
   res.json(session);
 });
 
+// The admin's only way in: it has a login instead of an email (contract 8.1).
+authRouter.post('/admin/login', adminLoginLimiter, async (req, res) => {
+  const { refreshToken, ...session } = await auth.adminLogin(adminLoginBody.parse(req.body));
+
+  setRefreshCookie(res, refreshToken);
+  res.json(session);
+});
+
 authRouter.post('/refresh', async (req, res) => {
   noBody.parse(req.body);
   const { refreshToken, ...session } = await auth.refresh(readRefreshCookie(req));
@@ -78,7 +88,9 @@ authRouter.post('/logout', async (req, res) => {
 
 export const meRouter = Router();
 
-meRouter.use(requireAuth, generalLimiter);
+// Reachable while a teacher waits for approval or a reset password must be changed
+// (contract 2.3); a blocked account still gets ACCOUNT_BLOCKED.
+meRouter.use(requireSignedIn, generalLimiter);
 
 meRouter.get('/', async (req, res) => {
   res.json(await auth.getMe(getAuth(req).id));

@@ -64,6 +64,16 @@ node --env-file=/etc/edunify/backend.env dist/db/migrate.js up
 
 Run the migration step on **every** deploy, before starting the new version. It applies only migrations that haven't run yet.
 
+Once, after the first migration, create the admin account. The password is read from the environment only for this command; it is never stored in the variables file:
+
+```sh
+read -rs ADMIN_PASSWORD && export ADMIN_PASSWORD     # at least 12 characters
+node --env-file=/etc/edunify/backend.env dist/db/seedAdmin.js
+unset ADMIN_PASSWORD
+```
+
+The login is `edunify_admin`, or `ADMIN_LOGIN` if set. Running it again changes nothing; add `--reset-password` to replace a forgotten admin password (this also signs the admin out everywhere).
+
 ## 4. systemd
 
 `/etc/systemd/system/edunify-backend.service`:
@@ -172,4 +182,5 @@ These depend on a real browser or a real API key, so the automated tests can't c
 
 1. Open a lesson whose file is a PDF, in Chrome and in Firefox, and check that it shows in the page. The backend sends helmet's default security headers with files, and their effect on the browsers' built-in PDF viewers inside an `<iframe>` hasn't been checked.
 2. Submit a drawing or photo homework with several large pages, to confirm the nginx limit above.
-3. If AI grading is on: for each AI provider that has a key, run AI grading on one submission of a homework type it handles, and check that a suggestion appears for the teacher.
+3. Sign in as the admin at `POST /api/v1/auth/admin/login` and check that a teacher who signs up gets `403 ACCOUNT_PENDING` on `GET /api/v1/categories`.
+4. If AI grading is on: for each AI provider that has a key, run AI grading on one submission of a homework type it handles, and check that a suggestion appears for the teacher.

@@ -22,8 +22,10 @@ import { submissionsRouter } from './modules/submissions/routes.js';
 import { useTestDatabase } from './test/database.js';
 import { api, createTestUser, type TestUser } from './test/users.js';
 
-// Contract 2.4 and 5, on every route: no token -> 401, the wrong role -> 403, and a resource
-// the caller doesn't own or isn't linked to -> the same 404 as one that doesn't exist.
+// Contract 2.4 and 5, on every route: no token -> 401, the wrong role -> 403 (the admin
+// included), and a resource the caller doesn't own or isn't linked to -> the same 404 as one
+// that doesn't exist. Contract 2.3, on every route too: a blocked, pending, or reset account
+// is stopped before any of that.
 
 useTestDatabase();
 
@@ -44,12 +46,13 @@ interface Fixture {
   jobId: string;
 }
 
-type Caller = 'owner' | 'student' | 'otherTeacher' | 'otherStudent';
+type Caller = 'owner' | 'student' | 'otherTeacher' | 'otherStudent' | 'admin';
 type Send = (user: TestUser | null, f: Fixture) => request.Test;
 
 interface Case {
-  // Who may call it at all: 'any' is every signed-in user.
-  role: 'teacher' | 'student' | 'both' | 'any';
+  // Who may call it at all. 'both': teachers and students, on something of the class.
+  // 'any': teachers and students, each for their own things. 'everyone': the admin too.
+  role: 'teacher' | 'student' | 'both' | 'any' | 'everyone';
   // The fixture value the access check is about: put a random id there and the rightful
   // caller gets the "doesn't exist" answer that strangers must also get.
   resource?: keyof Fixture;
@@ -87,12 +90,25 @@ function upload(path: string, user: TestUser | null): request.Test {
 const V1 = '/api/v1';
 
 const MATRIX: Record<string, Case> = {
-  'GET /api/v1/me': { role: 'any', ok: [['owner', 200], ['student', 200]], send: (u) => call('get', `${V1}/me`, u) },
-  'PATCH /api/v1/me': { role: 'any', ok: [['owner', 200]], send: (u) => call('patch', `${V1}/me`, u, { fullName: 'Renamed' }) },
+  'GET /api/v1/me': {
+    role: 'everyone',
+    ok: [['owner', 200], ['student', 200], ['admin', 200]],
+    send: (u) => call('get', `${V1}/me`, u),
+  },
+  'PATCH /api/v1/me': {
+    role: 'everyone',
+    ok: [['owner', 200], ['admin', 200]],
+    send: (u) => call('patch', `${V1}/me`, u, { firstName: 'Renamed' }),
+  },
   'POST /api/v1/me/password': {
-    role: 'any',
+    role: 'everyone',
     ok: [],
-    send: (u) => call('post', `${V1}/me/password`, u, { currentPassword: 'wrong-password', newPassword: 'new-password-1' }),
+    send: (u) =>
+      call('post', `${V1}/me/password`, u, {
+        currentPassword: 'wrong-password',
+        newPassword: 'new-password-1',
+        confirmNewPassword: 'new-password-1',
+      }),
   },
 
   'GET /api/v1/categories': { role: 'teacher', ok: [['owner', 200]], send: (u) => call('get', `${V1}/categories`, u) },
@@ -333,6 +349,7 @@ const PUBLIC = [
   'GET /api/v1/health',
   'POST /api/v1/auth/register',
   'POST /api/v1/auth/login',
+  'POST /api/v1/auth/admin/login',
   'POST /api/v1/auth/refresh',
   'POST /api/v1/auth/logout',
   'GET /api/v1/files/:id',
@@ -444,12 +461,23 @@ function strangers(role: Case['role']): Caller[] {
     case 'both':
       return ['otherTeacher', 'otherStudent'];
     case 'any':
+    case 'everyone':
       return ['student', 'otherTeacher', 'otherStudent'];
   }
 }
 
 function wrongRole(role: Case['role']): Caller[] {
-  return role === 'teacher' ? ['student', 'otherStudent'] : role === 'student' ? ['owner', 'otherTeacher'] : [];
+  switch (role) {
+    case 'teacher':
+      return ['student', 'otherStudent', 'admin'];
+    case 'student':
+      return ['owner', 'otherTeacher', 'admin'];
+    case 'both':
+    case 'any':
+      return ['admin'];
+    case 'everyone':
+      return [];
+  }
 }
 
 beforeEach(async () => {
@@ -460,6 +488,7 @@ beforeEach(async () => {
     student: await createTestUser('student'),
     otherTeacher: await createTestUser('teacher'),
     otherStudent: await createTestUser('student'),
+    admin: await createTestUser('admin'),
   };
   fixture = await buildFixture();
 });
@@ -519,5 +548,43 @@ describe.each(Object.entries(MATRIX))('%s', (_route, route) => {
       const res = await route.send(callers[caller], f);
       expect(res.status, `${caller}: ${JSON.stringify(res.body)}`).toBe(status);
     }
+  });
+});
+
+describe('account state on every route (contract 2.3)', () => {
+  // Reachable at the gate, so a pending teacher can wait and a reset password can be changed.
+  const GATE_FREE = ['GET /api/v1/me', 'PATCH /api/v1/me', 'POST /api/v1/me/password'];
+
+  async function expectEverywhere(user: TestUser, code: string, except: string[] = []): Promise<void> {
+    for (const [name, route] of Object.entries(MATRIX)) {
+      const res = await route.send(user, fixture);
+
+      if (except.includes(name)) {
+        expect(res.body.error?.code, name).not.toBe(code);
+      } else {
+        expect(res.status, name).toBe(403);
+        expect(res.body.error.code, name).toBe(code);
+      }
+    }
+  }
+
+  it('turns a blocked account away from every route', async () => {
+    await expectEverywhere(await createTestUser('student', 'Blocked Student', { status: 'blocked' }), 'ACCOUNT_BLOCKED');
+  });
+
+  it('keeps a pending teacher at the gate, before any role or ownership check', async () => {
+    await expectEverywhere(
+      await createTestUser('teacher', 'Pending Teacher', { status: 'pending' }),
+      'ACCOUNT_PENDING',
+      GATE_FREE,
+    );
+  });
+
+  it('sends a reset password to /me/password from every other route', async () => {
+    await expectEverywhere(
+      await createTestUser('student', 'Reset Student', { mustChangePassword: true }),
+      'PASSWORD_CHANGE_REQUIRED',
+      GATE_FREE,
+    );
   });
 });

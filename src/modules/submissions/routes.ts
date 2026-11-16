@@ -20,6 +20,7 @@ import type { NewSubmissionContent, PageType } from './service.js';
 export const submissionsRouter = Router();
 
 const studentOnly = requireRole('student');
+const teacherOrStudent = requireRole('teacher', 'student');
 
 // Math pages are stored exactly like draw pages (contract 3).
 const PAGE_UPLOADS: Record<PageType, RequestHandler> = {
@@ -75,7 +76,7 @@ submissionsRouter.get('/student/submissions', requireAuth, generalLimiter, stude
   res.json({ items: await submissions.listMySubmissions(getAuth(req).id, filter) });
 });
 
-submissionsRouter.get('/submissions/:id', requireAuth, generalLimiter, async (req, res) => {
+submissionsRouter.get('/submissions/:id', requireAuth, generalLimiter, teacherOrStudent, async (req, res) => {
   const { id } = idParamsSchema.parse(req.params);
   emptyQuerySchema.parse(req.query);
 

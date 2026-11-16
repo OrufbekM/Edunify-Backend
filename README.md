@@ -19,8 +19,11 @@ You need Node.js 24 and PostgreSQL 17.
 npm install
 cp .env.example .env        # then fill in the values, see below
 npm run migrate             # creates the tables in the database DATABASE_URL names
+ADMIN_PASSWORD='at least 12 characters' npm run seed:admin   # the admin account, once
 npm run dev                 # http://localhost:3000, restarts on file changes
 ```
+
+The admin signs in at `POST /auth/admin/login` with the login `edunify_admin` (or `ADMIN_LOGIN`) and that password. Running `seed:admin` again changes nothing; `npm run seed:admin -- --reset-password` replaces the admin's password with `ADMIN_PASSWORD`.
 
 `.env` holds:
 
@@ -58,6 +61,7 @@ DATABASE_URL=postgres://postgres:change-me@localhost:5432/edunify_test
 | `npm run build` | compile to `dist/` |
 | `npm start` | run the compiled server (production; the host provides the variables) |
 | `npm run migrate` / `migrate:down` / `migrate:status` | manage migrations on the `.env` database |
+| `npm run seed:admin` | create the one admin account from `ADMIN_LOGIN` and `ADMIN_PASSWORD` (`seed:admin:prod` runs the compiled one) |
 
 CI runs typecheck, lint, the tests and the build on every push to `main` and `dev` and on every pull request.
 
@@ -80,10 +84,10 @@ Each endpoint below lists who may call it:
 | Mark | Meaning |
 |---|---|
 | Public | no sign-in |
-| T | teachers only; students get `403 FORBIDDEN` |
-| S | students only; teachers get `403 FORBIDDEN` |
-| T, S | both, each seeing only their own |
-| Any | any signed-in user |
+| T | teachers only; everyone else gets `403 FORBIDDEN` |
+| S | students only; everyone else gets `403 FORBIDDEN` |
+| T, S | both, each seeing only their own; the admin gets `403 FORBIDDEN` |
+| Any | any signed-in user, the admin included |
 
 Teachers only ever see their own classes. Students only see a class while they have an **active link** to it, which takes two steps in either order:
 
@@ -94,13 +98,23 @@ Asking for something you don't own or aren't linked to gives the same `404 NOT_F
 
 ### Signing in and staying signed in
 
-1. `POST /auth/register` or `POST /auth/login` returns `{ user, accessToken }` and sets the refresh cookie `edunify_rt`. The cookie is `HttpOnly`, `SameSite=Strict`, sent only to `/api/v1/auth`, lasts 30 days, and is `Secure` in production.
+1. `POST /auth/register`, `POST /auth/login` (or `POST /auth/admin/login` for the admin) returns `{ user, accessToken }` and sets the refresh cookie `edunify_rt`. The cookie is `HttpOnly`, `SameSite=Strict`, sent only to `/api/v1/auth`, lasts 30 days, and is `Secure` in production.
 2. Send the access token on every other call: `Authorization: Bearer <accessToken>`. It lasts 15 minutes. Keep it in memory only, never in `localStorage`.
 3. When a call answers `401` with code `TOKEN_EXPIRED`, call `POST /auth/refresh` once (the browser sends the cookie), then repeat the call with the new token. Browsers need `withCredentials: true` (or `credentials: 'include'`) for the cookie to travel.
 4. Any other `401` means the session is over: show the sign-in page.
 5. On app start, call `POST /auth/refresh`. A `401` means nobody is signed in.
 
 Every refresh replaces the refresh token with a new one. If several tabs refresh with the same token within 10 seconds of each other, each of them gets a fresh access token, but no new cookie. Using an old refresh token after that, or after sign-out, ends that session everywhere (`401 UNAUTHENTICATED`).
+
+#### Account status
+
+The server reads the account on every call, so these take effect at once, even for an access token already handed out. It checks them in this order, before anything else:
+
+1. **Blocked** by the admin: every call answers `403 ACCOUNT_BLOCKED`, `/me` and `POST /auth/refresh` included. Sign the user out and say the account is blocked.
+2. **Password reset** by the admin (`user.mustChangePassword` is `true`): every call but `/me` and `/me/password` answers `403 PASSWORD_CHANGE_REQUIRED`. Show the "Set new password" screen; `POST /me/password` clears it.
+3. **Pending** (a new teacher, `user.status` is `pending`): every call but `/me` and `/me/password` answers `403 ACCOUNT_PENDING`. Show "Waiting for Edunify admin approval" and poll `GET /me` every 30 seconds until `status` is `active`.
+
+Students start `active`. Nothing is ever sent by email or SMS: there is no email check and no self-service password reset.
 
 ### Errors
 
@@ -117,8 +131,11 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | `VALIDATION_ERROR` | 400 | Invalid body, query, path or upload content |
 | `UNAUTHENTICATED` | 401 | Missing, invalid or revoked credentials |
 | `TOKEN_EXPIRED` | 401 | Access token expired: refresh and retry |
-| `INVALID_CREDENTIALS` | 401 | Wrong email, password, or current password |
+| `INVALID_CREDENTIALS` | 401 | Wrong email, login, password, or current password, or the wrong `role` at sign-in |
 | `FORBIDDEN` | 403 | This role may not use the endpoint |
+| `ACCOUNT_PENDING` | 403 | The teacher account is waiting for the admin's approval |
+| `ACCOUNT_BLOCKED` | 403 | The admin blocked this account |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | The admin reset the password; change it with `POST /me/password` first |
 | `FILE_URL_INVALID` | 403 | The signed file URL is invalid or has expired |
 | `NOT_FOUND` | 404 | Doesn't exist, or you can't see it |
 | `STUDENT_ID_NOT_FOUND` | 404 | No student has that ID |
@@ -143,6 +160,7 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 |---|---|
 | `POST /auth/login` | 10 per 15 minutes per IP and email |
 | Failed `POST /auth/login` | 100 per 15 minutes per IP, whatever the email; successful sign-ins don't count |
+| `POST /auth/admin/login` | 5 per 15 minutes per IP |
 | `POST /auth/register` | 10 per hour per IP |
 | Looking up an ID (`POST /student/claims`, adding or changing a roster row with `studentPublicId`) | 30 per 10 minutes per user |
 | `POST /lessons/:lessonId/ai-grade` | 5 per minute per user |
@@ -162,7 +180,11 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 |---|---|
 | `email` | valid email, up to 254 characters, stored in lowercase |
 | `password` | 8 to 128 characters |
-| `fullName` (user or roster row) | 1 to 100 |
+| `confirmPassword`, `confirmNewPassword` | the same as `password` / `newPassword` |
+| `firstName`, `lastName` | 1 to 50 each |
+| `phone` (teachers) | spaces, dashes and brackets are removed, then `+` and 8 to 15 digits, like `+998901234567`; stored that way |
+| Admin `login` | 3 to 40 of `a-z`, `0-9` and `_`, case ignored |
+| `fullName` (roster row) | 1 to 100 |
 | Category `name` | 1 to 60 |
 | Class `subject` / `name` | 1 to 80 / 0 to 80 |
 | Unit or lesson `title` | 1 to 120 |
@@ -202,10 +224,15 @@ type Grade = 2 | 3 | 4 | 5
 
 interface User {
   id: string
-  role: Role
-  fullName: string
-  email: string
-  publicId: string | null      // students only; null for teachers
+  role: 'teacher' | 'student' | 'admin'
+  firstName: string
+  lastName: string
+  email: string | null         // teachers and students; null for the admin
+  phone: string | null         // teachers only, like +998901234567
+  login: string | null         // the admin only
+  publicId: string | null      // students only
+  status: 'pending' | 'active' | 'blocked'   // teachers start pending
+  mustChangePassword: boolean  // true after an admin password reset
   createdAt: string
 }
 
@@ -342,13 +369,14 @@ All paths below start with `/api/v1`.
 | Endpoint | Who | What it does |
 |---|---|---|
 | `GET /health` | Public | Answers `200 { "status": "ok" }` when the server is up. |
-| `POST /auth/register` | Public | Creates an account and signs it in. Body `{ role, fullName, email, password }`. Returns `201 { user, accessToken }` and sets the refresh cookie. Students get their `publicId` here. Error: `EMAIL_TAKEN`. |
-| `POST /auth/login` | Public | Signs in. Body `{ email, password }`. Returns `200 { user, accessToken }` and sets the refresh cookie. Error: `INVALID_CREDENTIALS`. |
-| `POST /auth/refresh` | Cookie | Swaps the refresh cookie for a new access token. No body. Returns `200 { user, accessToken }` and a new cookie. Error: `UNAUTHENTICATED`. |
+| `POST /auth/register` | Public | Creates an account and signs it in. Teacher body `{ role: 'teacher', firstName, lastName, phone, email, password, confirmPassword }`; student body the same without `phone`. Returns `201 { user, accessToken }` and sets the refresh cookie. A teacher comes back `pending`; a student `active`, with a `publicId`. Errors: `EMAIL_TAKEN`, `VALIDATION_ERROR` (also for `role: 'admin'`). |
+| `POST /auth/login` | Public | Signs in a teacher or student. Body `{ role, email, password }`; a `role` that isn't the account's answers like a wrong password. Returns `200 { user, accessToken }` and sets the refresh cookie. A pending teacher can sign in. Errors: `INVALID_CREDENTIALS`, `ACCOUNT_BLOCKED` (only after the right password). |
+| `POST /auth/admin/login` | Public | Signs in the admin. Body `{ login, password }`. Returns `200 { user, accessToken }` and sets the refresh cookie. Error: `INVALID_CREDENTIALS`. |
+| `POST /auth/refresh` | Cookie | Swaps the refresh cookie for a new access token. No body. Returns `200 { user, accessToken }` and a new cookie. Errors: `UNAUTHENTICATED`, `ACCOUNT_BLOCKED`. |
 | `POST /auth/logout` | Cookie | Signs out: ends the cookie's session and clears the cookie. No body. Returns `204`, also when there is no cookie. |
-| `GET /me` | Any | Returns `200 User`. |
-| `PATCH /me` | Any | Changes your name. Body `{ fullName }`. Returns `200 User`. |
-| `POST /me/password` | Any | Changes your password. Body `{ currentPassword, newPassword }`. Returns `204` with a fresh refresh cookie for you, and signs out every other session. Error: `INVALID_CREDENTIALS` (wrong current password). |
+| `GET /me` | Any | Returns `200 User`. Works while pending or after a password reset. |
+| `PATCH /me` | Any | Changes your profile. Body `{ firstName?, lastName?, phone? }`; only teachers have a `phone`. Returns `200 User`. |
+| `POST /me/password` | Any | Changes your password. Body `{ currentPassword, newPassword, confirmNewPassword }`. Returns `204` with a fresh refresh cookie for you, signs out every other session, and clears `mustChangePassword`. Errors: `INVALID_CREDENTIALS` (wrong current password), `VALIDATION_ERROR`. |
 
 ### Categories (teachers)
 
@@ -483,11 +511,15 @@ JSON='Content-Type: application/json'
 
 # A teacher signs up. The access token goes in a variable, the refresh cookie in a cookie jar.
 T=$(curl -s -c teacher.jar -X POST $API/auth/register -H "$JSON" \
-  -d '{"role":"teacher","fullName":"Teacher One","email":"teacher@example.com","password":"long-password-1"}' | jq -r .accessToken)
+  -d '{"role":"teacher","firstName":"Teacher","lastName":"One","phone":"+998901234567","email":"teacher@example.com","password":"long-password-1","confirmPassword":"long-password-1"}' | jq -r .accessToken)
+
+# The teacher is pending until the admin approves. There is no admin API yet (plan, Phase 13),
+# so approve by hand in the database:
+psql "$DATABASE_URL" -c "UPDATE users SET status = 'active' WHERE email = 'teacher@example.com'"
 
 # A student signs up and gets a public ID to give the teacher.
 STUDENT=$(curl -s -X POST $API/auth/register -H "$JSON" \
-  -d '{"role":"student","fullName":"Student One","email":"student@example.com","password":"long-password-2"}')
+  -d '{"role":"student","firstName":"Student","lastName":"One","email":"student@example.com","password":"long-password-2","confirmPassword":"long-password-2"}')
 S=$(echo "$STUDENT" | jq -r .accessToken)
 STUDENT_ID=$(echo "$STUDENT" | jq -r .user.publicId)
 

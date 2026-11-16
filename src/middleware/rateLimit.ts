@@ -93,6 +93,9 @@ export const loginFailureLimiter = createRateLimiter({
   skipSuccessfulRequests: true,
 });
 
+// Contract 2.5: the admin sign-in, per IP whatever the login.
+export const adminLoginLimiter = createRateLimiter({ windowMs: 15 * MINUTE, limit: 5, keyGenerator: ipKey });
+
 export const registerLimiter = createRateLimiter({ windowMs: HOUR, limit: 10 });
 
 export const publicIdLookupLimiter = createRateLimiter({

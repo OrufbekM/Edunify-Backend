@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
+import { hash } from 'argon2';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -11,7 +13,9 @@ import { RefreshToken, User } from '../../db/models/index.js';
 import { hashRefreshToken } from '../../lib/tokens.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { createTestUser } from '../../test/users.js';
 import { refreshCookieOptions } from './routes.js';
+import { seedAdmin } from './service.js';
 
 useTestDatabase();
 
@@ -20,21 +24,53 @@ beforeEach(async () => {
 });
 
 const PASSWORD = 'correct horse battery';
-const USER_KEYS = ['createdAt', 'email', 'fullName', 'id', 'publicId', 'role'];
+const ADMIN_PASSWORD = 'a long admin password';
+const USER_KEYS = [
+  'createdAt',
+  'email',
+  'firstName',
+  'id',
+  'lastName',
+  'login',
+  'mustChangePassword',
+  'phone',
+  'publicId',
+  'role',
+  'status',
+];
 const ISO_MILLIS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function newEmail(): string {
   return `${randomUUID()}@example.com`;
 }
 
+// A student by default. A teacher gets a phone unless the test sends its own, and
+// confirmPassword follows password unless the test sends its own.
 function register(overrides: Record<string, unknown> = {}) {
-  return request(app)
-    .post('/api/v1/auth/register')
-    .send({ role: 'student', fullName: 'Ann Student', email: newEmail(), password: PASSWORD, ...overrides });
+  const body: Record<string, unknown> = {
+    role: 'student',
+    firstName: 'Ann',
+    lastName: 'Student',
+    email: newEmail(),
+    password: PASSWORD,
+    ...overrides,
+  };
+  if (body.role === 'teacher' && !('phone' in overrides)) {
+    body.phone = '+998 (90) 123-45-67';
+  }
+  if (!('confirmPassword' in overrides)) {
+    body.confirmPassword = body.password;
+  }
+
+  return request(app).post('/api/v1/auth/register').send(body);
 }
 
-function login(email: string, password = PASSWORD) {
-  return request(app).post('/api/v1/auth/login').send({ email, password });
+function login(email: string, password = PASSWORD, role = 'student') {
+  return request(app).post('/api/v1/auth/login').send({ role, email, password });
+}
+
+function adminLogin(loginName: string, password = ADMIN_PASSWORD) {
+  return request(app).post('/api/v1/auth/admin/login').send({ login: loginName, password });
 }
 
 function withCookie(path: string, token?: string) {
@@ -52,16 +88,18 @@ function logout(token?: string) {
 }
 
 function asUser(accessToken: string) {
+  const authorized = (pending: request.Test) => pending.set('Authorization', `Bearer ${accessToken}`);
+
   return {
-    getMe: () => request(app).get('/api/v1/me').set('Authorization', `Bearer ${accessToken}`),
-    patchMe: (body: object) =>
-      request(app).patch('/api/v1/me').set('Authorization', `Bearer ${accessToken}`).send(body),
-    changePassword: (body: object) =>
-      request(app)
-        .post('/api/v1/me/password')
-        .set('Authorization', `Bearer ${accessToken}`)
-        .send(body),
+    get: (path: string) => authorized(request(app).get(path)),
+    getMe: () => authorized(request(app).get('/api/v1/me')),
+    patchMe: (body: object) => authorized(request(app).patch('/api/v1/me')).send(body),
+    changePassword: (body: object) => authorized(request(app).post('/api/v1/me/password')).send(body),
   };
+}
+
+function passwordChange(currentPassword: string, newPassword: string) {
+  return { currentPassword, newPassword, confirmNewPassword: newPassword };
 }
 
 function refreshCookie(res: request.Response): { value: string; attributes: string[] } | undefined {
@@ -101,19 +139,38 @@ function expectError(res: request.Response, status: number, code: string): void 
   expect(res.body.error.code).toBe(code);
 }
 
+function detailPaths(res: request.Response): string[] {
+  return res.body.error.details.map((detail: { path: string }) => detail.path);
+}
+
+async function setAccount(userId: string, values: { status?: 'pending' | 'active' | 'blocked'; mustChangePassword?: boolean }) {
+  await User.update(values, { where: { id: userId } });
+}
+
+async function createAdmin(password = ADMIN_PASSWORD) {
+  return createTestUser('admin', 'Edunify Admin', { passwordHash: await hash(password) });
+}
+
 describe('POST /auth/register', () => {
-  it('creates a teacher without a publicId', async () => {
+  it('creates a pending teacher with the phone normalized and no publicId', async () => {
     const res = await register({ role: 'teacher' });
 
     expect(res.status).toBe(201);
-    expect(res.body.user.role).toBe('teacher');
-    expect(res.body.user.publicId).toBeNull();
+    expect(res.body.user).toMatchObject({
+      role: 'teacher',
+      status: 'pending',
+      phone: '+998901234567',
+      publicId: null,
+      login: null,
+      mustChangePassword: false,
+    });
   });
 
-  it('gives a student an 8-character publicId', async () => {
+  it('creates an active student with an 8-character publicId and no phone', async () => {
     const res = await register({ role: 'student' });
 
     expect(res.status).toBe(201);
+    expect(res.body.user).toMatchObject({ role: 'student', status: 'active', phone: null, login: null });
     expect(res.body.user.publicId).toMatch(/^[a-z0-9]{8}$/);
   });
 
@@ -131,19 +188,28 @@ describe('POST /auth/register', () => {
     expect((await asUser(res.body.accessToken).getMe()).body).toEqual(res.body.user);
   });
 
-  it('stores the email trimmed and lowercased', async () => {
-    const res = await register({ email: '  Ann.Mixed@Example.COM ' });
+  it('gives a new teacher the gate and nothing else until approved', async () => {
+    const { accessToken } = (await register({ role: 'teacher' })).body;
+    const teacher = asUser(accessToken);
 
-    expect(res.body.user.email).toBe('ann.mixed@example.com');
+    expect((await teacher.getMe()).status).toBe(200);
+    expectError(await teacher.get('/api/v1/categories'), 403, 'ACCOUNT_PENDING');
+  });
+
+  it('trims the names and stores the email trimmed and lowercased', async () => {
+    const res = await register({ firstName: '  Ann ', lastName: ' Lee  ', email: '  Ann.Mixed@Example.COM ' });
+
+    expect(res.body.user).toMatchObject({ firstName: 'Ann', lastName: 'Lee', email: 'ann.mixed@example.com' });
     await expect(User.findOne({ where: { id: res.body.user.id } })).resolves.toMatchObject({
       email: 'ann.mixed@example.com',
     });
   });
 
-  it('gives EMAIL_TAKEN for an email in another letter case', async () => {
+  it('gives EMAIL_TAKEN for an email in another letter case, whatever the role', async () => {
     await register({ email: 'taken@example.com' });
 
     expectError(await register({ email: 'TAKEN@Example.com' }), 409, 'EMAIL_TAKEN');
+    expectError(await register({ role: 'teacher', email: 'taken@example.com' }), 409, 'EMAIL_TAKEN');
   });
 
   it('gives EMAIL_TAKEN to the loser of two simultaneous registrations', async () => {
@@ -160,16 +226,23 @@ describe('POST /auth/register', () => {
   it.each([
     ['a short password', { password: '1234567' }, 'password'],
     ['a long password', { password: 'x'.repeat(129) }, 'password'],
-    ['an unknown role', { role: 'admin' }, 'role'],
+    ['a confirmPassword that differs', { confirmPassword: 'another password' }, 'confirmPassword'],
+    ['no confirmPassword', { confirmPassword: undefined }, 'confirmPassword'],
+    ['the admin role', { role: 'admin' }, 'role'],
     ['a malformed email', { email: 'not-an-email' }, 'email'],
     ['an email over 254 characters', { email: `${'a'.repeat(250)}@x.io` }, 'email'],
-    ['a blank full name', { fullName: '   ' }, 'fullName'],
-    ['a full name over 100 characters', { fullName: 'x'.repeat(101) }, 'fullName'],
+    ['a blank first name', { firstName: '   ' }, 'firstName'],
+    ['a last name over 50 characters', { lastName: 'x'.repeat(51) }, 'lastName'],
+    ['a teacher without a phone', { role: 'teacher', phone: undefined }, 'phone'],
+    ['a teacher phone without +', { role: 'teacher', phone: '998901234567' }, 'phone'],
+    ['a teacher phone with too few digits', { role: 'teacher', phone: '+9989012' }, 'phone'],
+    ['a teacher phone with letters', { role: 'teacher', phone: '+99890123456a' }, 'phone'],
+    ['a student with a phone', { phone: '+998901234567' }, 'phone'],
   ])('gives VALIDATION_ERROR for %s', async (_name, overrides, path) => {
     const res = await register(overrides);
 
     expectError(res, 400, 'VALIDATION_ERROR');
-    expect(res.body.error.details).toEqual([{ path, message: expect.any(String) }]);
+    expect(detailPaths(res)).toEqual([path]);
   });
 
   it('gives VALIDATION_ERROR for an unknown field', async () => {
@@ -238,17 +311,42 @@ describe('POST /auth/login', () => {
     expect(refreshCookie(res)?.attributes).toContain('Max-Age=2592000');
   });
 
-  it('answers a wrong password and an unknown email identically', async () => {
+  it('answers a wrong password, an unknown email, and the wrong role identically', async () => {
     const email = newEmail();
     await register({ email });
 
     const wrongPassword = await login(email, 'wrong password!');
     const unknownEmail = await login(newEmail());
+    const wrongRole = await login(email, PASSWORD, 'teacher');
 
     expectError(wrongPassword, 401, 'INVALID_CREDENTIALS');
-    expect(unknownEmail.status).toBe(401);
-    expect(unknownEmail.body).toEqual(wrongPassword.body);
-    expect(refreshCookie(wrongPassword)).toBeUndefined();
+    for (const res of [unknownEmail, wrongRole]) {
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(wrongPassword.body);
+      expect(refreshCookie(res)).toBeUndefined();
+    }
+  });
+
+  it('lets a pending teacher sign in, to be shown the gate', async () => {
+    const email = newEmail();
+    await register({ role: 'teacher', email });
+
+    const res = await login(email, PASSWORD, 'teacher');
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.status).toBe('pending');
+  });
+
+  it('gives ACCOUNT_BLOCKED only after the right password, and no cookie', async () => {
+    const email = newEmail();
+    const { user } = (await register({ email })).body;
+    await setAccount(user.id, { status: 'blocked' });
+
+    expectError(await login(email, 'wrong password!'), 401, 'INVALID_CREDENTIALS');
+
+    const res = await login(email);
+    expectError(res, 403, 'ACCOUNT_BLOCKED');
+    expect(refreshCookie(res)).toBeUndefined();
   });
 
   it('ignores the letter case of the email', async () => {
@@ -270,6 +368,78 @@ describe('POST /auth/login', () => {
 
   it('checks the password length on login too', async () => {
     expectError(await login(newEmail(), 'short'), 400, 'VALIDATION_ERROR');
+  });
+
+  it.each([
+    ['no role', undefined],
+    ['the admin role', 'admin'],
+  ])('gives VALIDATION_ERROR for %s', async (_name, role) => {
+    const res = await request(app).post('/api/v1/auth/login').send({ role, email: newEmail(), password: PASSWORD });
+
+    expectError(res, 400, 'VALIDATION_ERROR');
+    expect(detailPaths(res)).toEqual(['role']);
+  });
+});
+
+describe('POST /auth/admin/login', () => {
+  it('signs the admin in by login, ignoring case and spaces', async () => {
+    const admin = await createAdmin();
+
+    const res = await adminLogin(`  ${admin.login?.toUpperCase()} `);
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ role: 'admin', login: admin.login, email: null, phone: null, publicId: null });
+    expect(refreshCookie(res)?.attributes).toContain('Path=/api/v1/auth');
+    expect((await refresh(tokenOf(res))).status).toBe(200);
+  });
+
+  it('answers a wrong password and an unknown login identically', async () => {
+    const admin = await createAdmin();
+
+    const wrongPassword = await adminLogin(admin.login ?? '', 'wrong password!');
+    const unknownLogin = await adminLogin('nobody_here');
+
+    expectError(wrongPassword, 401, 'INVALID_CREDENTIALS');
+    expect(unknownLogin.body).toEqual(wrongPassword.body);
+  });
+
+  it('has no way in for teachers and students, who sign in with an email instead', async () => {
+    const email = newEmail();
+    await register({ role: 'teacher', email });
+
+    expectError(await adminLogin(email), 400, 'VALIDATION_ERROR');
+    expectError(await adminLogin('ann'), 401, 'INVALID_CREDENTIALS');
+  });
+
+  it('keeps the admin out of teacher and student routes', async () => {
+    const admin = await createAdmin();
+    const { accessToken } = (await adminLogin(admin.login ?? '')).body;
+    const caller = asUser(accessToken);
+
+    expect((await caller.getMe()).status).toBe(200);
+    expectError(await caller.get('/api/v1/categories'), 403, 'FORBIDDEN');
+    expectError(await caller.get('/api/v1/student/classes'), 403, 'FORBIDDEN');
+  });
+
+  it.each([
+    ['a login under 3 characters', 'ab'],
+    ['a login over 40 characters', 'a'.repeat(41)],
+    ['a login with other characters', 'bad-login!'],
+  ])('gives VALIDATION_ERROR for %s', async (_name, loginName) => {
+    const res = await adminLogin(loginName);
+
+    expectError(res, 400, 'VALIDATION_ERROR');
+    expect(detailPaths(res)).toEqual(['login']);
+  });
+
+  it('gives the 6th attempt from one IP 429 RATE_LIMITED, whatever the login', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      expect((await adminLogin(`nobody_${i}`)).status).toBe(401);
+    }
+
+    const res = await adminLogin('someone_else');
+    expectError(res, 429, 'RATE_LIMITED');
+    expect(Number(res.headers['retry-after'])).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -361,6 +531,27 @@ describe('POST /auth/refresh', () => {
     await expect(RefreshToken.count({ where: { familyId: family ?? '' } })).resolves.toBe(2);
   });
 
+  it('gives ACCOUNT_BLOCKED to a blocked account, revoked token or not, and rotates nothing', async () => {
+    const registered = await register();
+    const live = tokenOf(registered);
+    const revoked = tokenOf(await login(registered.body.user.email));
+    await RefreshToken.update({ revokedAt: new Date() }, { where: { tokenHash: hashRefreshToken(revoked) } });
+    await setAccount(registered.body.user.id, { status: 'blocked' });
+
+    expectError(await refresh(live), 403, 'ACCOUNT_BLOCKED');
+    expectError(await refresh(revoked), 403, 'ACCOUNT_BLOCKED');
+    expect((await stored(live))?.replacedAt).toBeNull();
+  });
+
+  it('keeps refreshing a pending teacher and a user who must change the password', async () => {
+    const teacher = await register({ role: 'teacher' });
+    const student = await register();
+    await setAccount(student.body.user.id, { mustChangePassword: true });
+
+    expect((await refresh(tokenOf(teacher))).body.user.status).toBe('pending');
+    expect((await refresh(tokenOf(student))).body.user.mustChangePassword).toBe(true);
+  });
+
   it('rejects a body with unknown fields', async () => {
     const token = tokenOf(await register());
 
@@ -436,29 +627,60 @@ describe('GET and PATCH /me', () => {
     expectError(await asUser(accessToken).getMe(), 401, 'UNAUTHENTICATED');
   });
 
-  it('updates the full name, trimmed', async () => {
+  it('gives ACCOUNT_BLOCKED to a blocked account', async () => {
+    const { user, accessToken } = (await register()).body;
+    await setAccount(user.id, { status: 'blocked' });
+
+    expectError(await asUser(accessToken).getMe(), 403, 'ACCOUNT_BLOCKED');
+  });
+
+  it('updates the names, trimmed, and only what is sent', async () => {
     const { accessToken } = (await register()).body;
     const caller = asUser(accessToken);
 
-    const res = await caller.patchMe({ fullName: '  New Name  ' });
+    const res = await caller.patchMe({ firstName: '  New  ', lastName: ' Name ' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ firstName: 'New', lastName: 'Name' });
+
+    expect((await caller.patchMe({ lastName: 'Only' })).body).toMatchObject({ firstName: 'New', lastName: 'Only' });
+    expect((await caller.patchMe({})).body).toMatchObject({ firstName: 'New', lastName: 'Only' });
+    expect((await caller.getMe()).body).toMatchObject({ firstName: 'New', lastName: 'Only' });
+  });
+
+  it('lets a teacher, pending or not, change the phone, normalized', async () => {
+    const { accessToken } = (await register({ role: 'teacher' })).body;
+
+    const res = await asUser(accessToken).patchMe({ phone: '+998 (91) 765-43-21' });
 
     expect(res.status).toBe(200);
-    expect(res.body.fullName).toBe('New Name');
-    expect((await caller.getMe()).body.fullName).toBe('New Name');
+    expect(res.body.phone).toBe('+998917654321');
+  });
+
+  it('refuses a phone from a student or the admin', async () => {
+    const student = (await register()).body.accessToken as string;
+    const admin = (await createAdmin()).token;
+
+    for (const token of [student, admin]) {
+      const res = await asUser(token).patchMe({ phone: '+998901234567' });
+      expectError(res, 400, 'VALIDATION_ERROR');
+      expect(res.body.error.details).toEqual([{ path: 'phone', message: expect.any(String) }]);
+    }
   });
 
   it.each([
-    ['no fullName', {}, 'fullName'],
-    ['a blank fullName', { fullName: '   ' }, 'fullName'],
-    ['a fullName over 100 characters', { fullName: 'x'.repeat(101) }, 'fullName'],
-    ['an unknown field', { fullName: 'Ann', email: 'other@example.com' }, 'email'],
+    ['a blank firstName', { firstName: '   ' }, 'firstName'],
+    ['a lastName over 50 characters', { lastName: 'x'.repeat(51) }, 'lastName'],
+    ['a malformed phone', { phone: '12345' }, 'phone'],
+    ['a null phone', { phone: null }, 'phone'],
+    ['the old fullName', { fullName: 'Ann Lee' }, 'fullName'],
+    ['an unknown field', { firstName: 'Ann', email: 'other@example.com' }, 'email'],
   ])('rejects %s', async (_name, body, path) => {
-    const { accessToken } = (await register()).body;
+    const { accessToken } = (await register({ role: 'teacher' })).body;
 
     const res = await asUser(accessToken).patchMe(body);
 
     expectError(res, 400, 'VALIDATION_ERROR');
-    expect(res.body.error.details.map((detail: { path: string }) => detail.path)).toContain(path);
+    expect(detailPaths(res)).toContain(path);
   });
 });
 
@@ -467,10 +689,7 @@ describe('POST /me/password', () => {
     const res = await register();
     const caller = asUser(res.body.accessToken);
 
-    const attempt = await caller.changePassword({
-      currentPassword: 'not my password',
-      newPassword: 'brand new password',
-    });
+    const attempt = await caller.changePassword(passwordChange('not my password', 'brand new password'));
 
     expectError(attempt, 401, 'INVALID_CREDENTIALS');
     expect(refreshCookie(attempt)).toBeUndefined();
@@ -483,10 +702,9 @@ describe('POST /me/password', () => {
     const registered = await register({ email });
     const otherDevice = tokenOf(await login(email));
 
-    const res = await asUser(registered.body.accessToken).changePassword({
-      currentPassword: PASSWORD,
-      newPassword: 'brand new password',
-    });
+    const res = await asUser(registered.body.accessToken).changePassword(
+      passwordChange(PASSWORD, 'brand new password'),
+    );
     const fresh = refreshCookie(res);
 
     expect(res.status).toBe(204);
@@ -507,14 +725,8 @@ describe('POST /me/password', () => {
     const registered = await register();
     const caller = asUser(registered.body.accessToken);
 
-    const first = await caller.changePassword({
-      currentPassword: PASSWORD,
-      newPassword: 'brand new password',
-    });
-    const second = await caller.changePassword({
-      currentPassword: 'brand new password',
-      newPassword: 'another new password',
-    });
+    const first = await caller.changePassword(passwordChange(PASSWORD, 'brand new password'));
+    const second = await caller.changePassword(passwordChange('brand new password', 'another new password'));
     const families = await Promise.all(
       [registered, first, second].map(async (res) => (await stored(tokenOf(res)))?.familyId),
     );
@@ -522,16 +734,40 @@ describe('POST /me/password', () => {
     expect(new Set(families).size).toBe(3);
   });
 
+  it('is the way out of an admin reset: every other route waits for it', async () => {
+    const { user, accessToken } = (await register()).body;
+    await setAccount(user.id, { mustChangePassword: true });
+    const caller = asUser(accessToken);
+
+    expectError(await caller.get('/api/v1/student/classes'), 403, 'PASSWORD_CHANGE_REQUIRED');
+    expect((await caller.getMe()).body.mustChangePassword).toBe(true);
+
+    expect((await caller.changePassword(passwordChange(PASSWORD, 'brand new password'))).status).toBe(204);
+
+    expect((await caller.getMe()).body.mustChangePassword).toBe(false);
+    expect((await caller.get('/api/v1/student/classes')).status).toBe(200);
+  });
+
   it('checks the length of both passwords', async () => {
+    const { accessToken } = (await register()).body;
+
+    const res = await asUser(accessToken).changePassword(passwordChange(PASSWORD, 'short'));
+
+    expectError(res, 400, 'VALIDATION_ERROR');
+    expect(res.body.error.details).toEqual([{ path: 'newPassword', message: expect.any(String) }]);
+  });
+
+  it('gives VALIDATION_ERROR when confirmNewPassword differs', async () => {
     const { accessToken } = (await register()).body;
 
     const res = await asUser(accessToken).changePassword({
       currentPassword: PASSWORD,
-      newPassword: 'short',
+      newPassword: 'brand new password',
+      confirmNewPassword: 'brand new passw0rd',
     });
 
     expectError(res, 400, 'VALIDATION_ERROR');
-    expect(res.body.error.details).toEqual([{ path: 'newPassword', message: expect.any(String) }]);
+    expect(res.body.error.details).toEqual([{ path: 'confirmNewPassword', message: expect.any(String) }]);
   });
 });
 
@@ -568,6 +804,89 @@ describe('rate limits', () => {
     }
 
     expectError(await register(), 429, 'RATE_LIMITED');
+  });
+});
+
+describe('seedAdmin', () => {
+  it('creates the admin, who can then sign in', async () => {
+    await expect(seedAdmin({ login: 'edunify_admin', password: ADMIN_PASSWORD, resetPassword: false })).resolves.toEqual({
+      outcome: 'created',
+      login: 'edunify_admin',
+    });
+
+    const res = await adminLogin('edunify_admin');
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({
+      role: 'admin',
+      firstName: 'Edunify',
+      lastName: 'Admin',
+      status: 'active',
+      mustChangePassword: false,
+    });
+  });
+
+  it('never changes an existing admin without resetPassword', async () => {
+    await seedAdmin({ login: 'edunify_admin', password: ADMIN_PASSWORD, resetPassword: false });
+
+    await expect(
+      seedAdmin({ login: 'other_admin', password: 'another admin password', resetPassword: false }),
+    ).resolves.toEqual({ outcome: 'exists', login: 'edunify_admin' });
+
+    await expect(User.count({ where: { role: 'admin' } })).resolves.toBe(1);
+    expect((await adminLogin('edunify_admin')).status).toBe(200);
+    expectError(await adminLogin('edunify_admin', 'another admin password'), 401, 'INVALID_CREDENTIALS');
+  });
+
+  it('replaces only the password with resetPassword, and ends the admin’s sessions', async () => {
+    await seedAdmin({ login: 'edunify_admin', password: ADMIN_PASSWORD, resetPassword: false });
+    const session = tokenOf(await adminLogin('edunify_admin'));
+
+    await expect(
+      seedAdmin({ login: 'other_admin', password: 'another admin password', resetPassword: true }),
+    ).resolves.toEqual({ outcome: 'password-reset', login: 'edunify_admin' });
+
+    expectError(await refresh(session), 401, 'UNAUTHENTICATED');
+    expectError(await adminLogin('edunify_admin'), 401, 'INVALID_CREDENTIALS');
+    expect((await adminLogin('edunify_admin', 'another admin password')).status).toBe(200);
+  });
+});
+
+describe('npm run seed:admin', () => {
+  function seed(vars: Record<string, string>, args: string[] = []) {
+    try {
+      const out = execFileSync(process.execPath, ['--import', 'tsx', 'src/db/seedAdmin.ts', ...args], {
+        env: { ...process.env, ADMIN_LOGIN: '', ADMIN_PASSWORD: '', ...vars },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { ok: true, out };
+    } catch (err) {
+      return { ok: false, out: String((err as { stderr?: string }).stderr) };
+    }
+  }
+
+  it('creates the admin under the default login, then leaves it alone', async () => {
+    const first = seed({ ADMIN_PASSWORD });
+    expect(first.ok).toBe(true);
+    expect(first.out).toContain('Created the admin "edunify_admin".');
+
+    const second = seed({ ADMIN_PASSWORD });
+    expect(second.ok).toBe(true);
+    expect(second.out).toContain('already exists');
+    expect((await adminLogin('edunify_admin')).status).toBe(200);
+  });
+
+  it.each([
+    ['a password under 12 characters', { ADMIN_PASSWORD: 'short pass' }, [], 'ADMIN_PASSWORD'],
+    ['no password', {}, [], 'ADMIN_PASSWORD'],
+    ['a malformed login', { ADMIN_LOGIN: 'bad login', ADMIN_PASSWORD }, [], 'login'],
+    ['an unknown argument', { ADMIN_PASSWORD }, ['--force'], 'Unknown argument'],
+  ])('refuses %s and creates nothing', async (_name, vars, args, message) => {
+    const result = seed(vars, args);
+
+    expect(result.ok).toBe(false);
+    expect(result.out).toContain(message);
+    await expect(User.count()).resolves.toBe(0);
   });
 });
 

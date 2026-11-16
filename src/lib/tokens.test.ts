@@ -118,7 +118,7 @@ describe('verifyAccessToken', () => {
 
   it.each([
     ['no role', {}, { subject: user.id, expiresIn: 900 }],
-    ['an unknown role', { role: 'admin' }, { subject: user.id, expiresIn: 900 }],
+    ['an unknown role', { role: 'manager' }, { subject: user.id, expiresIn: 900 }],
     ['no subject', { role: user.role }, { expiresIn: 900 }],
     ['a subject that is not a uuid', { role: user.role }, { subject: 'user-1', expiresIn: 900 }],
     ['no expiry', { role: user.role }, { subject: user.id }],
