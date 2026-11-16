@@ -3,6 +3,7 @@ import { env } from './config/env.js';
 import { startAiWorker } from './jobs/aiWorker.js';
 import { sequelize } from './db/index.js';
 import { logger } from './lib/logger.js';
+import { failUnfinishedJobs } from './modules/ai/service.js';
 import { initStorage } from './storage/index.js';
 
 try {
@@ -21,6 +22,17 @@ try {
   process.exit(1);
 }
 
+// AI grading is switched off for now (AI_GRADING_ENABLED): no worker runs, so close the jobs
+// it left unfinished instead of letting teachers wait on them.
+if (!env.AI_GRADING_ENABLED) {
+  try {
+    const closed = await failUnfinishedJobs('AI grading is turned off');
+    logger.info({ closed }, 'AI grading is turned off (AI_GRADING_ENABLED)');
+  } catch (err) {
+    logger.error({ err }, 'Could not close unfinished AI jobs');
+  }
+}
+
 // Express 5 hands listen failures such as EADDRINUSE to this callback instead of throwing.
 app.listen(env.PORT, (err) => {
   if (err) {
@@ -29,5 +41,8 @@ app.listen(env.PORT, (err) => {
   }
 
   logger.info(`EdunifyBackend running on http://localhost:${env.PORT}`);
-  startAiWorker();
+
+  if (env.AI_GRADING_ENABLED) {
+    startAiWorker();
+  }
 });

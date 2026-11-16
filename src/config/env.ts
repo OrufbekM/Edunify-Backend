@@ -27,6 +27,9 @@ const envSchema = z
     JWT_ACCESS_SECRET: z.string().min(32),
     FILE_URL_SECRET: z.string().min(32),
     STORAGE_DIR: z.string().refine(isAbsolute, 'Must be an absolute path'),
+    // AI grading is switched off until this is true. Off, starting a job answers AI_UNAVAILABLE
+    // and no worker runs; the AI code and the settings below stay as they are.
+    AI_GRADING_ENABLED: optionalText.pipe(z.stringbool().optional()).transform((on) => on ?? false),
     // Which AI grades which homework: text and code answers, and page images (draw, math,
     // photo). Both default to anthropic. The fallback is tried when the first one fails.
     AI_PROVIDER_TEXT: optionalProvider,

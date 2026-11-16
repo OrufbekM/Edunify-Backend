@@ -17,7 +17,7 @@ import { api, createTestUser, type TestUser } from '../../test/users.js';
 import { model, type ModelRequest, type ModelResponse } from './model.js';
 import { GRADE_SCHEMA, SYSTEM_PROMPT } from './prompt.js';
 import { http } from './providers.js';
-import { onJobQueued, pageBudget, requeueRunningJobs, runNextJob } from './service.js';
+import { failUnfinishedJobs, onJobQueued, pageBudget, requeueRunningJobs, runNextJob } from './service.js';
 
 useTestDatabase();
 
@@ -32,6 +32,7 @@ const PDF = Buffer.from('%PDF-1.4\nsecret pdf body\n%%EOF\n');
 
 // Every AI setting a test may change, put back after each test.
 const AI_SETTINGS = [
+  'AI_GRADING_ENABLED',
   'AI_PROVIDER_TEXT',
   'AI_PROVIDER_IMAGE',
   'AI_FALLBACK_PROVIDER',
@@ -269,6 +270,14 @@ describe('POST /lessons/:lessonId/ai-grade', () => {
   it('gives 503 AI_UNAVAILABLE without an API key, and queues nothing', async () => {
     await submitText('answer');
     env.ANTHROPIC_API_KEY = undefined;
+
+    expectError(await startJob(), 503, 'AI_UNAVAILABLE');
+    await expect(AiJob.count()).resolves.toBe(0);
+  });
+
+  it('gives 503 AI_UNAVAILABLE while AI grading is switched off, even with a key, and queues nothing', async () => {
+    await submitText('answer');
+    env.AI_GRADING_ENABLED = false;
 
     expectError(await startJob(), 503, 'AI_UNAVAILABLE');
     await expect(AiJob.count()).resolves.toBe(0);
@@ -760,6 +769,32 @@ describe('the worker loop', () => {
     } finally {
       await worker.stop();
     }
+  });
+});
+
+describe('switching AI grading off', () => {
+  it('closes queued and running jobs as failed, and leaves finished ones alone', async () => {
+    await submitText('answer');
+    const queued = (await startJob()).body.id as string;
+
+    const second = await addHomework('text', { title: 'Second' });
+    await submitText('answer', student, second.homeworkId);
+    const running = (await startJob(undefined, second.lessonId)).body.id as string;
+    await AiJob.update({ status: 'running' }, { where: { id: running } });
+
+    const third = await addHomework('text', { title: 'Third' });
+    await submitText('answer', student, third.homeworkId);
+    const done = (await startJob(undefined, third.lessonId)).body.id as string;
+    await AiJob.update({ status: 'done', finishedAt: new Date() }, { where: { id: done } });
+
+    await expect(failUnfinishedJobs('AI grading is turned off')).resolves.toBe(2);
+
+    for (const id of [queued, running]) {
+      const job = await jobRow(id);
+      expect(job).toMatchObject({ status: 'failed', error: 'AI grading is turned off' });
+      expect(job.finishedAt).toBeInstanceOf(Date);
+    }
+    expect(await jobRow(done)).toMatchObject({ status: 'done', error: null });
   });
 });
 

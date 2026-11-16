@@ -13,6 +13,7 @@ const BASE = {
 };
 
 const AI_FIELDS = [
+  'AI_GRADING_ENABLED',
   'AI_PROVIDER_TEXT',
   'AI_PROVIDER_IMAGE',
   'AI_FALLBACK_PROVIDER',
@@ -41,6 +42,21 @@ function load(vars: Record<string, string>): { ok: true; env: Record<string, unk
 }
 
 describe('AI settings', () => {
+  it('keeps AI grading off unless AI_GRADING_ENABLED turns it on', () => {
+    for (const vars of [{}, { AI_GRADING_ENABLED: '' }, { AI_GRADING_ENABLED: 'false' }] as Record<string, string>[]) {
+      expect(load({ ANTHROPIC_MODEL: 'c', ...vars })).toMatchObject({ ok: true, env: { AI_GRADING_ENABLED: false } });
+    }
+
+    expect(load({ ANTHROPIC_MODEL: 'c', AI_GRADING_ENABLED: 'true' })).toMatchObject({
+      ok: true,
+      env: { AI_GRADING_ENABLED: true },
+    });
+
+    const unclear = load({ ANTHROPIC_MODEL: 'c', AI_GRADING_ENABLED: 'maybe' });
+    expect(unclear.ok).toBe(false);
+    expect(unclear.ok === false && unclear.error).toContain('AI_GRADING_ENABLED');
+  });
+
   it('sends every homework type to Claude by default, which then needs ANTHROPIC_MODEL', () => {
     expect(load({ ANTHROPIC_MODEL: 'claude-opus-5-5' })).toMatchObject({
       ok: true,

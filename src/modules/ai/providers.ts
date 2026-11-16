@@ -195,8 +195,13 @@ export function providersFor(type: HomeworkType): AiProvider[] {
   return [...new Set(fallback ? [own, fallback] : [own])].filter(hasKey);
 }
 
-// Whether any homework type can be graded at all.
+// Whether any homework type can be graded at all. Never while AI grading is switched off
+// (AI_GRADING_ENABLED), whatever keys are set.
 export function aiConfigured(): boolean {
+  if (!env.AI_GRADING_ENABLED) {
+    return false;
+  }
+
   return providersFor('text').length > 0 || providersFor('photo').length > 0;
 }
 

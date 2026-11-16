@@ -198,6 +198,17 @@ export async function requeueRunningJobs(): Promise<number> {
   return count;
 }
 
+// While AI grading is switched off no worker runs, so a job left queued or running would stay
+// that way and the frontend would poll it forever. Contract 9: `failed` with `error` set means
+// the job itself could not run.
+export async function failUnfinishedJobs(error: string): Promise<number> {
+  const [count] = await AiJob.update(
+    { status: 'failed', error, finishedAt: new Date() },
+    { where: { status: ['queued', 'running'] } },
+  );
+  return count;
+}
+
 // The oldest queued job. SKIP LOCKED: two workers never claim one job and never wait for
 // each other. A job that runs again starts its counters from zero (plan, Phase 10).
 async function claimJob(): Promise<{ id: string; lessonId: string; submissionIds: string[] } | null> {

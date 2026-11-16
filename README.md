@@ -32,6 +32,7 @@ npm run dev                 # http://localhost:3000, restarts on file changes
 | `JWT_ACCESS_SECRET` | at least 32 characters |
 | `FILE_URL_SECRET` | at least 32 characters, different from the JWT secret |
 | `STORAGE_DIR` | absolute path where uploaded files are kept |
+| `AI_GRADING_ENABLED` | `true` turns AI grading on; default `false` (switched off for now): starting a job answers `503 AI_UNAVAILABLE` and no worker runs |
 | `AI_PROVIDER_TEXT` | the AI that grades typed answers (`text`, `code`): `anthropic`, `gemini` or `openai`; default `anthropic` |
 | `AI_PROVIDER_IMAGE` | the AI that grades pages (`draw`, `math`, `photo`); default `anthropic` |
 | `AI_FALLBACK_PROVIDER` | optional; tried when the first AI fails (overloaded, out of quota, a bad answer) |
@@ -446,6 +447,8 @@ Both show only lessons that have homework, as columns in outline order, with one
 ### AI grading (teachers)
 
 An AI reads the lesson's Markdown file, the homework instructions and the student's work, and suggests a grade and a comment. It never grades on its own: the suggestion is shown only to the teacher, who confirms it with `PUT /submissions/:id/grade` and `fromAi: true`. PDFs are not sent to the AI.
+
+**AI grading is switched off for now** (`AI_GRADING_ENABLED` is `false` by default). While it is off, `POST /lessons/:lessonId/ai-grade` answers `503 AI_UNAVAILABLE`, no job runs, and jobs left unfinished are closed as `failed` when the server starts. Suggestions made earlier can still be confirmed.
 
 Which AI grades depends on the homework type and the server's settings: typed answers (`text`, `code`) go to `AI_PROVIDER_TEXT`, pages (`draw`, `math`, `photo`) to `AI_PROVIDER_IMAGE`, each one Claude, Gemini or OpenAI. If that AI fails, `AI_FALLBACK_PROVIDER` gets the same request. Every AI gets the same instructions and its answer goes through the same checks, so the API behaves the same whichever graded. Page images are scaled down for the AI only (at most 2576 px on the long edge, and smaller when a submission has many large pages); the stored page the teacher sees is unchanged.
 
