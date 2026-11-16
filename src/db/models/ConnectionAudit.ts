@@ -9,10 +9,10 @@ import {
 
 import { sequelize } from '../index.js';
 
-// Written on every re-link and unlink (contract section 6.3). Append-only: created_at only.
-export class LinkAudit extends Model<
-  InferAttributes<LinkAudit>,
-  InferCreationAttributes<LinkAudit>
+// Written on every reconnect and disconnect (contract section 6.3). Append-only: created_at only.
+export class ConnectionAudit extends Model<
+  InferAttributes<ConnectionAudit>,
+  InferCreationAttributes<ConnectionAudit>
 > {
   declare id: CreationOptional<string>;
   declare classStudentId: string;
@@ -23,7 +23,7 @@ export class LinkAudit extends Model<
   declare createdAt: CreationOptional<Date>;
 }
 
-LinkAudit.init(
+ConnectionAudit.init(
   {
     id: {
       type: DataTypes.UUID,
@@ -37,5 +37,5 @@ LinkAudit.init(
     changedBy: { type: DataTypes.UUID, allowNull: false },
     createdAt: { type: DataTypes.DATE, allowNull: false },
   },
-  { sequelize, tableName: 'link_audit', underscored: true, updatedAt: false },
+  { sequelize, tableName: 'connection_audit', underscored: true, updatedAt: false },
 );

@@ -1,22 +1,30 @@
 import { Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
-import { Category, ClassStudent, SchoolClass } from '../../db/models/index.js';
+import { Category, ClassStudent, SchoolClass, Unit } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
+import { orderOutOfRange, writePositions } from '../../lib/positions.js';
 import { insertWithPublicId } from '../../lib/publicId.js';
 import { lockTeacher } from '../categories/service.js';
 import { deleteFileRows, lockLessonFiles, removeStoredFiles } from '../files/service.js';
 
 const CLASS_CAP = 100;
 
+// Contract 8.3: every new class starts with one unit.
+const FIRST_UNIT_TITLE = 'Unit 1';
+
 // Only teacher routes return this, so a class publicId reaches only its teacher (contract 6.1).
 export interface ClassDto {
   id: string;
   categoryId: string;
-  subject: string;
-  name: string | null;
+  order: number;
+  name: string;
   publicId: string;
   studentCount: number;
+  // Latest versions waiting for a grade; counted from plan Phase 16.
+  newSubmissionCount: number;
+  // The other classes of its group; class groups arrive in plan Phase 17.
+  linkedClasses: { id: string; name: string }[];
   createdAt: string;
 }
 
@@ -24,10 +32,12 @@ function toClassDto(schoolClass: SchoolClass, studentCount: number): ClassDto {
   return {
     id: schoolClass.id,
     categoryId: schoolClass.categoryId,
-    subject: schoolClass.subject,
+    order: schoolClass.position,
     name: schoolClass.name,
     publicId: schoolClass.publicId,
     studentCount,
+    newSubmissionCount: 0,
+    linkedClasses: [],
     createdAt: schoolClass.createdAt.toISOString(),
   };
 }
@@ -85,19 +95,38 @@ async function assertOwnCategory(
   }
 }
 
-async function studentCount(classId: string): Promise<number> {
-  return ClassStudent.count({ where: { classId } });
+// The class ids of a category in order.
+async function classIdsIn(categoryId: string, transaction: Transaction): Promise<string[]> {
+  const classes = await SchoolClass.findAll({
+    attributes: ['id'],
+    where: { categoryId },
+    order: [
+      ['position', 'ASC'],
+      ['id', 'ASC'],
+    ],
+    transaction,
+  });
+
+  return classes.map((schoolClass) => schoolClass.id);
 }
 
+async function studentCount(classId: string, transaction?: Transaction): Promise<number> {
+  return ClassStudent.count({ where: { classId }, transaction });
+}
+
+// Sorted by category order, then class order (contract 8.3).
 export async function listClasses(
   teacherId: string,
   filter: { categoryId?: string },
 ): Promise<ClassDto[]> {
   const classes = await SchoolClass.findAll({
     where: { teacherId, ...(filter.categoryId ? { categoryId: filter.categoryId } : {}) },
+    include: [{ model: Category, attributes: [], required: true }],
     order: [
-      ['createdAt', 'DESC'],
-      ['id', 'DESC'],
+      [Category, 'position', 'ASC'],
+      ['categoryId', 'ASC'],
+      ['position', 'ASC'],
+      ['id', 'ASC'],
     ],
   });
 
@@ -122,9 +151,10 @@ export async function getClass(teacherId: string, classId: string): Promise<Clas
   return toClassDto(schoolClass, await studentCount(classId));
 }
 
+// Placed last in its category, with its first unit (contract 8.3).
 export async function createClass(
   teacherId: string,
-  input: { categoryId: string; subject: string; name?: string | null },
+  input: { categoryId: string; name: string },
 ): Promise<ClassDto> {
   return insertWithPublicId((publicId) =>
     sequelize.transaction(async (transaction) => {
@@ -139,51 +169,77 @@ export async function createClass(
         {
           categoryId: input.categoryId,
           teacherId,
-          subject: input.subject,
-          name: input.name ?? null,
+          name: input.name,
+          position: await SchoolClass.count({ where: { categoryId: input.categoryId }, transaction }),
           publicId,
         },
         { transaction },
       );
+      await Unit.create({ classId: schoolClass.id, title: FIRST_UNIT_TITLE, position: 0 }, { transaction });
 
       return toClassDto(schoolClass, 0);
     }),
   );
 }
 
+// `order` is the class's 0-based index in the category it ends up in: the new one when
+// `categoryId` changes, else its own. A move to another category without `order` puts it
+// last there (contract 8.3). Both categories stay dense.
 export async function updateClass(
   teacherId: string,
   classId: string,
-  input: { categoryId?: string; subject?: string; name?: string | null },
+  input: { categoryId?: string; name?: string; order?: number },
 ): Promise<ClassDto> {
-  const schoolClass = await getOwnClass(teacherId, classId);
-  const changes: { categoryId?: string; subject?: string; name?: string | null } = {};
+  return sequelize.transaction(async (transaction) => {
+    await lockTeacher(teacherId, transaction);
+    const schoolClass = await getOwnClass(teacherId, classId, transaction);
+    const from = schoolClass.categoryId;
+    const to = input.categoryId ?? from;
 
-  if (input.categoryId !== undefined) {
-    await assertOwnCategory(teacherId, input.categoryId);
-    changes.categoryId = input.categoryId;
-  }
-  if (input.subject !== undefined) {
-    changes.subject = input.subject;
-  }
-  // `name: null` clears it; an absent name leaves it alone.
-  if (input.name !== undefined) {
-    changes.name = input.name;
-  }
+    if (to !== from) {
+      await assertOwnCategory(teacherId, to, transaction);
+    }
 
-  await schoolClass.update(changes);
+    if (input.name !== undefined) {
+      schoolClass.name = input.name;
+    }
 
-  return toClassDto(schoolClass, await studentCount(classId));
+    if (to !== from || input.order !== undefined) {
+      const siblings = (await classIdsIn(to, transaction)).filter((id) => id !== classId);
+      const order = input.order ?? siblings.length;
+
+      if (order > siblings.length) {
+        throw orderOutOfRange(siblings.length);
+      }
+
+      schoolClass.categoryId = to;
+      await schoolClass.save({ transaction });
+      await writePositions('classes', [...siblings.slice(0, order), classId, ...siblings.slice(order)], transaction);
+
+      if (to !== from) {
+        await writePositions('classes', await classIdsIn(from, transaction), transaction);
+      }
+
+      await schoolClass.reload({ transaction });
+    } else {
+      await schoolClass.save({ transaction });
+    }
+
+    return toClassDto(schoolClass, await studentCount(classId, transaction));
+  });
 }
 
 // The database cascades everything in the class; its files go once the transaction has
-// committed. The class lock keeps new lessons out while the files are collected.
+// committed. The class lock keeps new lessons out while the files are collected, and the
+// classes after it in its category move up one.
 export async function deleteClass(teacherId: string, classId: string): Promise<void> {
   const storageKeys = await sequelize.transaction(async (transaction) => {
+    await lockTeacher(teacherId, transaction);
     const schoolClass = await lockOwnClass(teacherId, classId, transaction);
     const fileIds = await lockLessonFiles({ classId }, transaction);
 
     await schoolClass.destroy({ transaction });
+    await writePositions('classes', await classIdsIn(schoolClass.categoryId, transaction), transaction);
 
     return deleteFileRows(fileIds, transaction);
   });

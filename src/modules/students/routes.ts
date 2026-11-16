@@ -14,7 +14,7 @@ import {
 import * as students from './service.js';
 
 // Contract 2.5 counts a create or update as a lookup only when it carries a
-// studentPublicId: adding a name alone, or unlinking with null, looks nothing up.
+// studentPublicId: adding a name alone, or disconnecting with null, looks nothing up.
 const limitStudentIdLookups: RequestHandler = (req, res, next) => {
   const studentPublicId: unknown = req.body?.studentPublicId;
 

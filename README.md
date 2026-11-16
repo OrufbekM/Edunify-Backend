@@ -1,6 +1,6 @@
 # Edunify backend
 
-The REST API behind Edunify, a homework platform for schools. Teachers organise classes into lessons, set homework, and grade what students hand in, optionally with suggestions from Claude. Students link to their classes, submit text, code, drawings or photos, and see their grades.
+The REST API behind Edunify, a homework platform for schools. Teachers organise classes into lessons, set homework, and grade what students hand in, optionally with suggestions from Claude. Students connect to their classes, submit text, code, drawings or photos, and see their grades.
 
 Built with Node.js 24, Express 5, PostgreSQL 17 and Sequelize. Uploaded files are stored on local disk.
 
@@ -75,7 +75,7 @@ CI runs typecheck, lint, the tests and the build on every push to `main` and `de
 - Ids are UUIDs. Times are ISO 8601 in UTC with milliseconds, like `2026-11-05T07:08:09.123Z`.
 - Request bodies are strict: an unknown field is a `400 VALIDATION_ERROR`.
 - Text is trimmed before it is checked, so `"  Maths "` is stored as `"Maths"`. Passwords are the exception: they are used exactly as typed.
-- Optional text that is empty after trimming (a class name, homework instructions, a grade comment) is stored as `null`.
+- Optional text that is empty after trimming (homework instructions, a grade comment) is stored as `null`.
 
 ### Who can call what
 
@@ -90,12 +90,12 @@ Each endpoint below lists who may call it:
 | Any | any signed-in user, the admin included |
 | AD | the admin only; everyone else gets `403 FORBIDDEN` |
 
-Teachers only ever see their own classes. Students only see a class while they have an **active link** to it, which takes two steps in either order:
+Teachers only ever see their own classes. Students only see a class while they are **connected** to it, which takes two steps in either order:
 
 1. The teacher adds the student to the class roster with the student's ID (`studentPublicId`).
 2. The student enters the class ID (`classPublicId`) through `POST /student/claims`.
 
-Asking for something you don't own or aren't linked to gives the same `404 NOT_FOUND` as asking for something that doesn't exist, so the API never reveals whether it exists.
+Asking for something you don't own or aren't connected to gives the same `404 NOT_FOUND` as asking for something that doesn't exist, so the API never reveals whether it exists.
 
 ### Signing in and staying signed in
 
@@ -190,7 +190,7 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | Admin `login` | 3 to 40 of `a-z`, `0-9` and `_`, case ignored |
 | `fullName` (roster row) | 1 to 100 |
 | Category `name` | 1 to 60 |
-| Class `subject` / `name` | 1 to 80 / 0 to 80 |
+| Class `name` | 1 to 80 |
 | Unit or lesson `title` | 1 to 120 |
 | Homework `instructionsText` | up to 10,000 |
 | Text submission | 1 to 20,000 |
@@ -222,7 +222,7 @@ type UserStatus = 'pending' | 'active' | 'blocked'
 type HomeworkType = 'text' | 'draw' | 'math' | 'code' | 'photo'   // math works exactly like draw
 type SubmissionStatus = 'submitted' | 'denied' | 'graded'
 type CellStatus = 'empty' | 'submitted' | 'denied' | 'graded'    // 'empty' = nothing handed in yet
-type LinkState = 'no_id' | 'awaiting_student' | 'active'
+type ConnectionState = 'not_connected' | 'awaiting_student' | 'connected'
 type NotificationKind = 'graded' | 'denied' | 'submitted'
 type JobStatus = 'queued' | 'running' | 'done' | 'failed'
 type Grade = 2 | 3 | 4 | 5
@@ -250,15 +250,17 @@ interface FileRef {
   expiresAt: string
 }
 
-interface Category { id: string; name: string; classCount: number; createdAt: string }
+interface Category { id: string; name: string; order: number; classCount: number; createdAt: string }
 
 interface Class {
   id: string
   categoryId: string
-  subject: string
-  name: string | null
+  order: number                // 0-based within its category
+  name: string
   publicId: string             // show as #XXXX-XXXX
   studentCount: number
+  newSubmissionCount: number   // always 0 for now (plan Phase 16)
+  linkedClasses: { id: string; name: string }[]   // always [] for now (plan Phase 17)
   createdAt: string
 }
 
@@ -266,7 +268,7 @@ interface ClassStudent {
   id: string
   fullName: string                 // the name on the teacher's roster
   studentPublicId: string | null   // the student's ID the teacher entered, or null
-  linkState: LinkState             // no_id, awaiting_student (no claim yet), active
+  connectionState: ConnectionState // not_connected, awaiting_student (no claim yet), connected
 }
 
 interface Unit { id: string; classId: string; title: string; order: number }
@@ -358,8 +360,7 @@ interface NotificationItem {
   lessonId: string
   classId: string
   lessonTitle: string
-  classSubject: string
-  className: string | null
+  className: string
   studentName: string | null   // the roster name, on a teacher's 'submitted' notification only
   createdAt: string
 }
@@ -389,20 +390,20 @@ Categories group a teacher's classes.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /categories` | Your categories, sorted by name. `200 { items: Category[] }` |
-| `POST /categories` | Body `{ name }`. `201 Category`. Errors: `CATEGORY_NAME_TAKEN`, `LIMIT_REACHED`. |
-| `PATCH /categories/:id` | Renames it. Body `{ name }`. `200 Category`. Error: `CATEGORY_NAME_TAKEN`. |
-| `DELETE /categories/:id` | `204`. Error: `CATEGORY_NOT_EMPTY` while it still has classes. |
+| `GET /categories` | Your categories, sorted by `order`. `200 { items: Category[] }` |
+| `POST /categories` | Body `{ name }`. Adds it last. `201 Category`. Errors: `CATEGORY_NAME_TAKEN`, `LIMIT_REACHED`. |
+| `PATCH /categories/:id` | Body `{ name?, order? }`: renames it, and/or moves it to the 0-based position `order` among your categories (the others shift to make room). `200 Category`. Errors: `CATEGORY_NAME_TAKEN`, `VALIDATION_ERROR` for an `order` past the last category. |
+| `DELETE /categories/:id` | `204`; the categories after it move up one. Error: `CATEGORY_NOT_EMPTY` while it still has classes. |
 
 ### Classes (teachers)
 
 | Endpoint | What it does |
 |---|---|
-| `GET /classes?categoryId=` | Your classes, newest first; `categoryId` is an optional filter. `200 { items: Class[] }` |
-| `POST /classes` | Body `{ categoryId, subject, name? }`. `201 Class`, with its generated `publicId` to give to students. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a category that isn't yours. |
+| `GET /classes?categoryId=` | Your classes in category order, then class `order`; `categoryId` is an optional filter. `200 { items: Class[] }` |
+| `POST /classes` | Body `{ categoryId, name }`. Adds it last in its category, with its first unit, `Unit 1`. `201 Class`, with its generated `publicId` to give to students. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a category that isn't yours. |
 | `GET /classes/:id` | `200 Class` |
-| `PATCH /classes/:id` | Body `{ categoryId?, subject?, name? }`; `name: null` clears the name. `200 Class` |
-| `DELETE /classes/:id` | Deletes the class with everything in it: roster, lessons, homework, submissions, grades and files. `204` |
+| `PATCH /classes/:id` | Body `{ categoryId?, name?, order? }`. `order` is the 0-based position in the category the class ends up in: the new one when `categoryId` changes, else its own. Moving to another category without `order` puts it last there. Send both on every drag and drop. `200 Class`. Error: `VALIDATION_ERROR` for an `order` past the end or a category that isn't yours. |
+| `DELETE /classes/:id` | Deletes the class with everything in it: roster, lessons, homework, submissions, grades and files. The classes after it move up one. `204` |
 
 ### Class roster (teachers)
 
@@ -410,9 +411,9 @@ Each row is one student in the class, with the name the teacher knows them by. A
 
 | Endpoint | What it does |
 |---|---|
-| `GET /classes/:classId/students` | The roster, sorted by name, each row with its `linkState`. `200 { items: ClassStudent[] }` |
+| `GET /classes/:classId/students` | The roster, sorted by name, each row with its `connectionState`. `200 { items: ClassStudent[] }` |
 | `POST /classes/:classId/students` | Adds a row. Body `{ fullName, studentPublicId? }`. `201 ClassStudent`. Errors: `STUDENT_ID_NOT_FOUND`, `STUDENT_ID_IN_USE`, `LIMIT_REACHED`. |
-| `PATCH /classes/:classId/students/:id` | Body `{ fullName?, studentPublicId? }`. A new `studentPublicId` moves the row to another account, for a student who lost theirs; the old account loses access at once. `studentPublicId: null` unlinks the row. `200 ClassStudent`. Same errors as adding. |
+| `PATCH /classes/:classId/students/:id` | Body `{ fullName?, studentPublicId? }`. A new `studentPublicId` moves the row to another account, for a student who lost theirs; the old account loses access at once. `studentPublicId: null` disconnects the row. `200 ClassStudent`. Same errors as adding. |
 | `DELETE /classes/:classId/students/:id` | Deletes the row with its submissions and grades. `204` |
 
 ### Student side (students)
@@ -420,7 +421,7 @@ Each row is one student in the class, with the name the teacher knows them by. A
 | Endpoint | What it does |
 |---|---|
 | `POST /student/claims` | Enters a class ID. Body `{ classPublicId }`. Returns `200 { "saved": true }` for any existing class, whether or not the teacher has added you yet, and doing it twice is harmless. Error: `CLASS_ID_NOT_FOUND`. |
-| `GET /student/classes` | Classes you have an active link to, sorted by subject. `200 { items: [{ id, subject, name, teacherName, classStudentId }] }` |
+| `GET /student/classes` | Classes you are connected to, sorted by name. `200 { items: [{ id, name, teacherName, classStudentId }] }` |
 
 ### Outline, units and lessons
 
@@ -456,8 +457,8 @@ Each hand-in is a new version; earlier versions and their grades stay.
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `POST /homeworks/:homeworkId/submissions` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Returns `201 Submission` with the next version number, and notifies the teacher. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` without an active link to the class. |
-| `GET /student/submissions?classId=` | S | Your latest version of each homework, newest first; `classId` is an optional filter. `200 { items: [{ submission, lesson: { id, title }, class: { id, subject, name } }] }` |
+| `POST /homeworks/:homeworkId/submissions` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Returns `201 Submission` with the next version number, and notifies the teacher. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` when you aren't connected to the class. |
+| `GET /student/submissions?classId=` | S | Your latest version of each homework, newest first; `classId` is an optional filter. `200 { items: [{ submission, lesson: { id, title }, class: { id, name } }] }` |
 | `GET /submissions/:id` | T, S | One version, with the list of all versions of that homework by that student, newest first. `200 Submission & { versions: SubmissionVersion[] }` |
 
 ### Grading (teachers)
@@ -474,8 +475,8 @@ Both show only lessons that have homework, as columns in outline order, with one
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `GET /classes/:classId/journal` | T | The whole class: `200 { units: Unit[], columns: [{ lessonId, title, unitId }], rows: [{ classStudentId, fullName, linkState, cells: JournalCell[], average }] }`. Rows are sorted by name; `cells` line up with `columns`. |
-| `GET /student/grades` | S | Your own grades, one item per class: `200 { items: [{ class: { id, subject, name }, columns, cells, average }] }` |
+| `GET /classes/:classId/journal` | T | The whole class: `200 { units: Unit[], columns: [{ lessonId, title, unitId }], rows: [{ classStudentId, fullName, connectionState, cells: JournalCell[], average }] }`. Rows are sorted by name; `cells` line up with `columns`. |
+| `GET /student/grades` | S | Your own grades, one item per class: `200 { items: [{ class: { id, name }, columns, cells, average }] }`, sorted by class name |
 
 ### AI grading (teachers)
 
@@ -544,13 +545,13 @@ STUDENT_ID=$(echo "$STUDENT" | jq -r .user.publicId)
 # The teacher makes a category and a class, and adds the student by ID.
 CATEGORY=$(curl -s -X POST $API/categories -H "Authorization: Bearer $T" -H "$JSON" -d '{"name":"Mathematics"}' | jq -r .id)
 CLASS=$(curl -s -X POST $API/classes -H "Authorization: Bearer $T" -H "$JSON" \
-  -d "{\"categoryId\":\"$CATEGORY\",\"subject\":\"Algebra\",\"name\":\"7A\"}")
+  -d "{\"categoryId\":\"$CATEGORY\",\"name\":\"Algebra 7A\"}")
 CLASS_ID=$(echo "$CLASS" | jq -r .id)
 CLASS_PUBLIC_ID=$(echo "$CLASS" | jq -r .publicId)
 curl -s -X POST $API/classes/$CLASS_ID/students -H "Authorization: Bearer $T" -H "$JSON" \
-  -d "{\"fullName\":\"Ali Valiyev\",\"studentPublicId\":\"$STUDENT_ID\"}"      # linkState: awaiting_student
+  -d "{\"fullName\":\"Ali Valiyev\",\"studentPublicId\":\"$STUDENT_ID\"}"      # connectionState: awaiting_student
 
-# The student enters the class ID: the link is now active.
+# The student enters the class ID: now they are connected.
 curl -s -X POST $API/student/claims -H "Authorization: Bearer $S" -H "$JSON" -d "{\"classPublicId\":\"$CLASS_PUBLIC_ID\"}"
 
 # The teacher adds a lesson with text homework.

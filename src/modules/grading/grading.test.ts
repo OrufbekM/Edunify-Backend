@@ -27,7 +27,7 @@ let homeworkId: string;
 
 async function createClass(owner: TestUser) {
   const category = await api(owner).post('/api/v1/categories', { name: `C ${randomUUID()}` });
-  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Maths', name: '7A' }))
+  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths 7A' }))
     .body as { id: string; publicId: string };
 }
 

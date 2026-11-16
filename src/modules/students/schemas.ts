@@ -14,7 +14,7 @@ export const addStudentBody = z.strictObject({
   studentPublicId: publicIdSchema.nullable().optional(),
 });
 
-// An absent studentPublicId leaves the link alone; null unlinks (contract 6.3).
+// An absent studentPublicId leaves the connection alone; null disconnects (contract 6.3).
 export const updateStudentBody = z.strictObject({
   fullName: fullName.optional(),
   studentPublicId: publicIdSchema.nullable().optional(),

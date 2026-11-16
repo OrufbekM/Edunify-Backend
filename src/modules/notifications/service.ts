@@ -14,8 +14,7 @@ export interface NotificationItemDto {
   lessonId: string;
   classId: string;
   lessonTitle: string;
-  classSubject: string;
-  className: string | null;
+  className: string;
   studentName: string | null;
   createdAt: string;
 }
@@ -46,7 +45,7 @@ export async function removeUnread(
 }
 
 // Removing a grade takes back the unread graded or denied notice for it (contract 8.12),
-// from whichever account got it: the row may have been re-linked since. Read ones stay,
+// from whichever account got it: the row may have been reconnected since. Read ones stay,
 // and so does the teacher's own submitted notice.
 export async function removeUnreadGradeNotices(
   submissionId: string,
@@ -59,7 +58,7 @@ export async function removeUnreadGradeNotices(
 }
 
 // Unread, and about a submission the user can still open: in a class they teach, or on a
-// roster row actively linked to them. A student re-linked away from a row stops seeing its
+// roster row connected to them. A student reconnected away from a row stops seeing its
 // notifications, as they stop seeing the class (contract 6.3).
 const UNREAD_FOR_USER = `
      FROM notifications n
@@ -94,7 +93,6 @@ export async function listUnread(userId: string): Promise<NotificationItemDto[]>
             l.id AS "lessonId",
             c.id AS "classId",
             l.title AS "lessonTitle",
-            c.subject AS "classSubject",
             c.name AS "className",
             CASE WHEN n.kind = 'submitted' AND c.teacher_id = n.user_id
                  THEN cs.full_name END AS "studentName",

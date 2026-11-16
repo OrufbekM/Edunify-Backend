@@ -2,10 +2,10 @@ import { AiJob } from './AiJob.js';
 import { Category } from './Category.js';
 import { ClassClaim } from './ClassClaim.js';
 import { ClassStudent } from './ClassStudent.js';
+import { ConnectionAudit } from './ConnectionAudit.js';
 import { FileRecord } from './FileRecord.js';
 import { Homework } from './Homework.js';
 import { Lesson } from './Lesson.js';
-import { LinkAudit } from './LinkAudit.js';
 import { Notification } from './Notification.js';
 import { RefreshToken } from './RefreshToken.js';
 import { SchoolClass } from './SchoolClass.js';
@@ -34,7 +34,7 @@ SchoolClass.belongsTo(Category, { foreignKey: 'categoryId' });
 User.hasMany(SchoolClass, { foreignKey: 'teacherId' });
 SchoolClass.belongsTo(User, { foreignKey: 'teacherId', as: 'teacher' });
 
-// the link (contract section 6)
+// the connection (contract section 6)
 SchoolClass.hasMany(ClassStudent, { foreignKey: 'classId', onDelete: 'CASCADE' });
 ClassStudent.belongsTo(SchoolClass, { foreignKey: 'classId' });
 
@@ -47,10 +47,10 @@ ClassClaim.belongsTo(User, { foreignKey: 'studentUserId', as: 'studentUser' });
 SchoolClass.hasMany(ClassClaim, { foreignKey: 'classId', onDelete: 'CASCADE' });
 ClassClaim.belongsTo(SchoolClass, { foreignKey: 'classId' });
 
-ClassStudent.hasMany(LinkAudit, { foreignKey: 'classStudentId', onDelete: 'CASCADE' });
-LinkAudit.belongsTo(ClassStudent, { foreignKey: 'classStudentId' });
+ClassStudent.hasMany(ConnectionAudit, { foreignKey: 'classStudentId', onDelete: 'CASCADE' });
+ConnectionAudit.belongsTo(ClassStudent, { foreignKey: 'classStudentId' });
 // old_user_id and new_user_id carry no foreign key, so they get no association.
-LinkAudit.belongsTo(User, { foreignKey: 'changedBy', as: 'changedByUser' });
+ConnectionAudit.belongsTo(User, { foreignKey: 'changedBy', as: 'changedByUser' });
 
 // outline
 SchoolClass.hasMany(Unit, { foreignKey: 'classId', onDelete: 'CASCADE' });
@@ -100,7 +100,7 @@ export {
   FileRecord,
   Homework,
   Lesson,
-  LinkAudit,
+  ConnectionAudit,
   Notification,
   RefreshToken,
   SchoolClass,

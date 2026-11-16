@@ -27,9 +27,13 @@ let student: TestUser;
 let schoolClass: SchoolClass;
 let rowId: string;
 
-async function createClass(subject = 'Maths', owner = teacher, name: string | null = '7A'): Promise<SchoolClass> {
+async function createClass(name = 'Maths 7A', owner = teacher): Promise<SchoolClass> {
   const category = await api(owner).post('/api/v1/categories', { name: `C ${randomUUID()}` });
-  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, subject, name })).body;
+  const created = (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name })).body;
+  // These tests cover the v1 outline from an empty class, so the Unit 1 every new class gets
+  // (contract 8.3, tested in classes.test.ts) is removed. Plan Phase 15 rewrites them.
+  await Unit.destroy({ where: { classId: created.id } });
+  return created;
 }
 
 async function addRow(fullName: string, account?: TestUser, claim = true, forClass = schoolClass): Promise<string> {
@@ -156,7 +160,7 @@ describe('GET /classes/:classId/journal', () => {
     expect(columns.map((column: { lessonId: string }) => column.lessonId)).toEqual([inHigh.lessonId, inLow.lessonId]);
   });
 
-  it('gives every roster row, sorted by name, with its linkState and empty cells', async () => {
+  it('gives every roster row, sorted by name, with its connectionState and empty cells', async () => {
     const awaiting = await createTestUser('student');
     const zRow = await addRow('Zara', awaiting, false);
     const bRow = await addRow('bobur');
@@ -169,21 +173,21 @@ describe('GET /classes/:classId/journal', () => {
         {
           classStudentId: rowId,
           fullName: 'Ali Valiyev',
-          linkState: 'active',
+          connectionState: 'connected',
           cells: [{ lessonId, status: 'empty', value: null, submissionId: null }],
           average: null,
         },
         {
           classStudentId: bRow,
           fullName: 'bobur',
-          linkState: 'no_id',
+          connectionState: 'not_connected',
           cells: [{ lessonId, status: 'empty', value: null, submissionId: null }],
           average: null,
         },
         {
           classStudentId: zRow,
           fullName: 'Zara',
-          linkState: 'awaiting_student',
+          connectionState: 'awaiting_student',
           cells: [{ lessonId, status: 'empty', value: null, submissionId: null }],
           average: null,
         },
@@ -244,7 +248,7 @@ describe('GET /classes/:classId/journal', () => {
     await expect(journal()).resolves.toEqual({
       units: [],
       columns: [],
-      rows: [{ classStudentId: rowId, fullName: 'Ali Valiyev', linkState: 'active', cells: [], average: null }],
+      rows: [{ classStudentId: rowId, fullName: 'Ali Valiyev', connectionState: 'connected', cells: [], average: null }],
     });
   });
 
@@ -294,8 +298,8 @@ describe('GET /classes/:classId/journal', () => {
 });
 
 describe('GET /student/grades', () => {
-  it('gives one item per class with an active link, sorted by subject, with only their own cells', async () => {
-    const biology = await createClass('biology', teacher, null);
+  it('gives one item per connected class, sorted by name, with only their own cells', async () => {
+    const biology = await createClass('biology');
     const chemistry = await createClass('Chemistry');
     const art = await createClass('Art');
     const bioRow = await addRow('Ali V.', student, true, biology);
@@ -308,13 +312,13 @@ describe('GET /student/grades', () => {
 
     await expect(grades()).resolves.toEqual([
       {
-        class: { id: biology.id, subject: 'biology', name: null },
+        class: { id: biology.id, name: 'biology' },
         columns: [{ lessonId, title: 'Cells', unitId: null }],
         cells: [{ lessonId, status: 'graded', value: 5, submissionId: graded.id }],
         average: 5,
       },
       {
-        class: { id: schoolClass.id, subject: 'Maths', name: '7A' },
+        class: { id: schoolClass.id, name: 'Maths 7A' },
         columns: [],
         cells: [],
         average: null,

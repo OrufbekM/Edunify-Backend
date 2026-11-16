@@ -30,9 +30,9 @@ let student: TestUser;
 let schoolClass: { id: string; publicId: string };
 let rowId: string;
 
-async function createClass(user: TestUser, name: string | null = '7A') {
+async function createClass(user: TestUser, name = 'Maths 7A') {
   const category = await api(user).post('/api/v1/categories', { name: `C ${randomUUID()}` });
-  return (await api(user).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Maths', name }))
+  return (await api(user).post('/api/v1/classes', { categoryId: category.body.id, name }))
     .body as { id: string; publicId: string };
 }
 
@@ -492,8 +492,7 @@ describe('the teacher is notified', () => {
         lessonId,
         classId: schoolClass.id,
         lessonTitle: 'Kasrlar',
-        classSubject: 'Maths',
-        className: '7A',
+        className: 'Maths 7A',
         studentName: 'Ali Valiyev',
         createdAt: expect.stringMatching(ISO_MILLIS),
       },
@@ -636,15 +635,15 @@ describe('GET /student/submissions', () => {
       {
         submission: expect.objectContaining({ id: latest.id, version: 2, isLatest: true }),
         lesson: { id: fractions.lessonId, title: 'Fractions' },
-        class: { id: schoolClass.id, subject: 'Maths', name: '7A' },
+        class: { id: schoolClass.id, name: 'Maths 7A' },
       },
       expect.objectContaining({ lesson: { id: angles.lessonId, title: 'Angles' } }),
     ]);
     expect(res.body.items[0].submission).not.toHaveProperty('aiSuggestion');
   });
 
-  it('filters by classId and leaves out classes without an active link', async () => {
-    const other = await createClass(teacher, null);
+  it('filters by classId and leaves out classes the student is not connected to', async () => {
+    const other = await createClass(teacher, 'Maths');
     await linkActive(student, 'Ali', other);
     const here = await addHomework('text', 'Here');
     const there = await addHomework('text', 'There', other.id);
@@ -653,7 +652,7 @@ describe('GET /student/submissions', () => {
 
     const filtered = await api(student).get(`/api/v1/student/submissions?classId=${other.id}`);
     expect(filtered.body.items.map((item: { lesson: { title: string } }) => item.lesson.title)).toEqual(['There']);
-    expect(filtered.body.items[0].class).toEqual({ id: other.id, subject: 'Maths', name: null });
+    expect(filtered.body.items[0].class).toEqual({ id: other.id, name: 'Maths' });
 
     await api(teacher).patch(`/api/v1/classes/${schoolClass.id}/students/${rowId}`, { studentPublicId: null });
     const all = await api(student).get('/api/v1/student/submissions');

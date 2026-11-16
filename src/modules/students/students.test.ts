@@ -3,12 +3,12 @@ import { randomUUID } from 'node:crypto';
 import type request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { ClassClaim, ClassStudent, LinkAudit } from '../../db/models/index.js';
+import { ClassClaim, ClassStudent, ConnectionAudit } from '../../db/models/index.js';
 import { generatePublicId } from '../../lib/publicId.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
-import { getActiveClassStudent } from './service.js';
+import { getConnectedClassStudent } from './service.js';
 
 useTestDatabase();
 
@@ -16,11 +16,11 @@ interface RosterRow {
   id: string;
   fullName: string;
   studentPublicId: string | null;
-  linkState: 'no_id' | 'awaiting_student' | 'active';
+  connectionState: 'not_connected' | 'awaiting_student' | 'connected';
 }
 
-const ROSTER_KEYS = ['fullName', 'id', 'linkState', 'studentPublicId'];
-const STUDENT_CLASS_KEYS = ['classStudentId', 'id', 'name', 'subject', 'teacherName'];
+const ROSTER_KEYS = ['connectionState', 'fullName', 'id', 'studentPublicId'];
+const STUDENT_CLASS_KEYS = ['classStudentId', 'id', 'name', 'teacherName'];
 
 let teacher: TestUser;
 let otherTeacher: TestUser;
@@ -34,7 +34,7 @@ async function createClass(user: TestUser, body: object = {}) {
 
   const res = await api(user).post('/api/v1/classes', {
     categoryId: category.body.id,
-    subject: 'Maths',
+    name: 'Maths',
     ...body,
   });
   expect(res.status).toBe(201);
@@ -46,7 +46,7 @@ beforeEach(async () => {
   teacher = await createTestUser('teacher', 'Ms Teacher');
   otherTeacher = await createTestUser('teacher');
   student = await createTestUser('student');
-  ({ id: classId, publicId: classPublicId } = await createClass(teacher, { name: '7A' }));
+  ({ id: classId, publicId: classPublicId } = await createClass(teacher, { name: 'Maths 7A' }));
 });
 
 function publicIdOf(user: TestUser): string {
@@ -117,9 +117,9 @@ describe('GET /classes/:classId/students', () => {
         id: linked.id,
         fullName: 'Ali',
         studentPublicId: publicIdOf(student),
-        linkState: 'awaiting_student',
+        connectionState: 'awaiting_student',
       },
-      { id: unlinked.id, fullName: 'Bea', studentPublicId: null, linkState: 'no_id' },
+      { id: unlinked.id, fullName: 'Bea', studentPublicId: null, connectionState: 'not_connected' },
     ]);
   });
 
@@ -166,14 +166,14 @@ describe('POST /classes/:classId/students', () => {
       id: expect.any(String),
       fullName: 'Ali Valiyev',
       studentPublicId: null,
-      linkState: 'no_id',
+      connectionState: 'not_connected',
     });
   });
 
   it('treats studentPublicId null as no ID', async () => {
     expect(await addStudent({ studentPublicId: null })).toMatchObject({
       studentPublicId: null,
-      linkState: 'no_id',
+      connectionState: 'not_connected',
     });
   });
 
@@ -182,14 +182,14 @@ describe('POST /classes/:classId/students', () => {
 
     const row = await addStudent({ studentPublicId: ` #${id.slice(0, 4)}-${id.slice(4)} ` });
 
-    expect(row).toMatchObject({ studentPublicId: publicIdOf(student), linkState: 'awaiting_student' });
+    expect(row).toMatchObject({ studentPublicId: publicIdOf(student), connectionState: 'awaiting_student' });
     await expect(ClassStudent.findByPk(row.id)).resolves.toMatchObject({ studentUserId: student.id });
   });
 
   it('does not audit a new row', async () => {
     await linkStudent(student);
 
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
   });
 
   it('gives STUDENT_ID_NOT_FOUND for an ID no student has, and adds nothing', async () => {
@@ -291,16 +291,16 @@ describe('the two-sided link', () => {
   it('teacher first: awaiting_student until the student claims, then active', async () => {
     const row = await linkStudent(student);
 
-    expect(row.linkState).toBe('awaiting_student');
+    expect(row.connectionState).toBe('awaiting_student');
     await expect(myClasses(student)).resolves.toEqual([]);
 
     const res = await claim(student);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ saved: true });
-    await expect(rosterRow(row.id)).resolves.toMatchObject({ linkState: 'active' });
+    await expect(rosterRow(row.id)).resolves.toMatchObject({ connectionState: 'connected' });
     await expect(myClasses(student)).resolves.toEqual([
-      { id: classId, subject: 'Maths', name: '7A', teacherName: 'Ms Teacher', classStudentId: row.id },
+      { id: classId, name: 'Maths 7A', teacherName: 'Ms Teacher', classStudentId: row.id },
     ]);
   });
 
@@ -310,7 +310,7 @@ describe('the two-sided link', () => {
 
     const row = await linkStudent(student);
 
-    expect(row.linkState).toBe('active');
+    expect(row.connectionState).toBe('connected');
     await expect(myClasses(student)).resolves.toMatchObject([{ id: classId, classStudentId: row.id }]);
   });
 
@@ -318,7 +318,7 @@ describe('the two-sided link', () => {
     const row = await linkStudent(student);
     await claim(await createTestUser('student'));
 
-    await expect(rosterRow(row.id)).resolves.toMatchObject({ linkState: 'awaiting_student' });
+    await expect(rosterRow(row.id)).resolves.toMatchObject({ connectionState: 'awaiting_student' });
   });
 
   it("a claim of another class does not activate this class's row", async () => {
@@ -326,7 +326,7 @@ describe('the two-sided link', () => {
     const row = await linkStudent(student);
     await claim(student, other.publicId);
 
-    await expect(rosterRow(row.id)).resolves.toMatchObject({ linkState: 'awaiting_student' });
+    await expect(rosterRow(row.id)).resolves.toMatchObject({ connectionState: 'awaiting_student' });
   });
 
   it('links a row that had no ID through PATCH, audited', async () => {
@@ -339,14 +339,14 @@ describe('the two-sided link', () => {
       id: row.id,
       fullName: 'Ali',
       studentPublicId: publicIdOf(student),
-      linkState: 'awaiting_student',
+      connectionState: 'awaiting_student',
     });
-    await expect(LinkAudit.findAll({ raw: true })).resolves.toMatchObject([
+    await expect(ConnectionAudit.findAll({ raw: true })).resolves.toMatchObject([
       { classStudentId: row.id, oldUserId: null, newUserId: student.id, changedBy: teacher.id },
     ]);
 
     await claim(student);
-    await expect(rosterRow(row.id)).resolves.toMatchObject({ linkState: 'active' });
+    await expect(rosterRow(row.id)).resolves.toMatchObject({ connectionState: 'connected' });
   });
 });
 
@@ -402,15 +402,15 @@ describe('POST /student/claims', () => {
 });
 
 describe('GET /student/classes', () => {
-  it('lists active links only, sorted by subject ignoring letter case, without the class publicId', async () => {
+  it('lists connected classes only, sorted by name ignoring letter case, without the class publicId', async () => {
     const artTeacher = await createTestUser('teacher', 'Mr Other');
     const classes = [
-      await createClass(teacher, { subject: 'physics' }),
-      await createClass(artTeacher, { subject: 'Art' }),
-      await createClass(teacher, { subject: 'biology' }),
+      await createClass(teacher, { name: 'physics' }),
+      await createClass(artTeacher, { name: 'Art' }),
+      await createClass(teacher, { name: 'biology' }),
     ];
-    const awaiting = await createClass(teacher, { subject: 'Awaiting' });
-    const claimedOnly = await createClass(teacher, { subject: 'Claimed only' });
+    const awaiting = await createClass(teacher, { name: 'Awaiting' });
+    const claimedOnly = await createClass(teacher, { name: 'Claimed only' });
 
     for (const [index, { id, publicId }] of classes.entries()) {
       const owner = index === 1 ? artTeacher : teacher;
@@ -425,12 +425,11 @@ describe('GET /student/classes', () => {
     for (const item of items) {
       expect(Object.keys(item).sort()).toEqual(STUDENT_CLASS_KEYS);
     }
-    expect(items.map((item) => [item.subject, item.teacherName])).toEqual([
+    expect(items.map((item) => [item.name, item.teacherName])).toEqual([
       ['Art', 'Mr Other'],
       ['biology', 'Ms Teacher'],
       ['physics', 'Ms Teacher'],
     ]);
-    expect(items.map((item) => item.name)).toEqual([null, null, null]);
   });
 
   it('rejects unknown query parameters', async () => {
@@ -442,7 +441,7 @@ describe('PATCH /classes/:classId/students/:id', () => {
   async function activeRow(user = student): Promise<RosterRow> {
     const row = await linkStudent(user);
     await claim(user);
-    expect((await rosterRow(row.id))?.linkState).toBe('active');
+    expect((await rosterRow(row.id))?.connectionState).toBe('connected');
     return row;
   }
 
@@ -457,35 +456,35 @@ describe('PATCH /classes/:classId/students/:id', () => {
       id: row.id,
       fullName: 'Ali',
       studentPublicId: publicIdOf(newAccount),
-      linkState: 'awaiting_student',
+      connectionState: 'awaiting_student',
     });
-    await expect(getActiveClassStudent(student.id, classId)).rejects.toMatchObject({
+    await expect(getConnectedClassStudent(student.id, classId)).rejects.toMatchObject({
       code: 'NOT_FOUND',
       status: 404,
     });
     await expect(myClasses(student)).resolves.toEqual([]);
     await expect(myClasses(newAccount)).resolves.toEqual([]);
-    await expect(getActiveClassStudent(newAccount.id, classId)).rejects.toMatchObject({
+    await expect(getConnectedClassStudent(newAccount.id, classId)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
 
     await claim(newAccount);
 
-    await expect(rosterRow(row.id)).resolves.toMatchObject({ linkState: 'active' });
+    await expect(rosterRow(row.id)).resolves.toMatchObject({ connectionState: 'connected' });
     await expect(myClasses(newAccount)).resolves.toMatchObject([{ id: classId, classStudentId: row.id }]);
-    await expect(getActiveClassStudent(newAccount.id, classId)).resolves.toMatchObject({ id: row.id });
-    await expect(LinkAudit.findAll({ raw: true })).resolves.toMatchObject([
+    await expect(getConnectedClassStudent(newAccount.id, classId)).resolves.toMatchObject({ id: row.id });
+    await expect(ConnectionAudit.findAll({ raw: true })).resolves.toMatchObject([
       { classStudentId: row.id, oldUserId: student.id, newUserId: newAccount.id, changedBy: teacher.id },
     ]);
   });
 
-  it('activates at once when the new account has already claimed the class', async () => {
+  it('connects at once when the new account has already claimed the class', async () => {
     const row = await activeRow();
     const newAccount = await createTestUser('student');
     await claim(newAccount);
 
-    expect((await patchStudent(row.id, { studentPublicId: publicIdOf(newAccount) })).body.linkState).toBe(
-      'active',
+    expect((await patchStudent(row.id, { studentPublicId: publicIdOf(newAccount) })).body.connectionState).toBe(
+      'connected',
     );
   });
 
@@ -495,10 +494,10 @@ describe('PATCH /classes/:classId/students/:id', () => {
     const res = await patchStudent(row.id, { studentPublicId: null });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: row.id, fullName: 'Ali', studentPublicId: null, linkState: 'no_id' });
-    await expect(getActiveClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(res.body).toEqual({ id: row.id, fullName: 'Ali', studentPublicId: null, connectionState: 'not_connected' });
+    await expect(getConnectedClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(myClasses(student)).resolves.toEqual([]);
-    await expect(LinkAudit.findAll({ raw: true })).resolves.toMatchObject([
+    await expect(ConnectionAudit.findAll({ raw: true })).resolves.toMatchObject([
       { classStudentId: row.id, oldUserId: student.id, newUserId: null, changedBy: teacher.id },
     ]);
   });
@@ -509,8 +508,8 @@ describe('PATCH /classes/:classId/students/:id', () => {
 
     const res = await patchStudent(row.id, { studentPublicId: publicIdOf(student) });
 
-    expect(res.body.linkState).toBe('active');
-    await expect(LinkAudit.count()).resolves.toBe(2);
+    expect(res.body.connectionState).toBe('connected');
+    await expect(ConnectionAudit.count()).resolves.toBe(2);
   });
 
   it('changes nothing and audits nothing when the same ID is sent again', async () => {
@@ -520,8 +519,8 @@ describe('PATCH /classes/:classId/students/:id', () => {
     const res = await patchStudent(row.id, { studentPublicId: publicIdOf(student).toUpperCase() });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ...row, linkState: 'active' });
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    expect(res.body).toEqual({ ...row, connectionState: 'connected' });
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
     await expect(ClassStudent.findByPk(row.id)).resolves.toMatchObject({ updatedAt: before?.updatedAt });
   });
 
@@ -529,7 +528,7 @@ describe('PATCH /classes/:classId/students/:id', () => {
     const row = await addStudent({});
 
     expect((await patchStudent(row.id, { studentPublicId: null })).status).toBe(200);
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
   });
 
   it('renames with a trimmed name and leaves the link alone', async () => {
@@ -541,9 +540,9 @@ describe('PATCH /classes/:classId/students/:id', () => {
       id: row.id,
       fullName: 'Ali Valiyev',
       studentPublicId: publicIdOf(student),
-      linkState: 'active',
+      connectionState: 'connected',
     });
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
   });
 
   it('accepts an empty body and changes nothing', async () => {
@@ -568,7 +567,7 @@ describe('PATCH /classes/:classId/students/:id', () => {
       fullName: 'Bea',
       studentUserId: null,
     });
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
   });
 
   it('gives STUDENT_ID_NOT_FOUND for an ID no student has, and changes nothing', async () => {
@@ -580,7 +579,7 @@ describe('PATCH /classes/:classId/students/:id', () => {
       'STUDENT_ID_NOT_FOUND',
     );
     await expect(ClassStudent.findByPk(row.id)).resolves.toMatchObject({ studentUserId: student.id });
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
   });
 
   it('gives 404 NOT_FOUND for a row of another class, even an own one, before any lookup', async () => {
@@ -625,9 +624,9 @@ describe('DELETE /classes/:classId/students/:id', () => {
     expect(res.status).toBe(204);
     expect(res.text).toBe('');
     await expect(ClassStudent.findByPk(row.id)).resolves.toBeNull();
-    await expect(LinkAudit.count()).resolves.toBe(0);
+    await expect(ConnectionAudit.count()).resolves.toBe(0);
     await expect(myClasses(student)).resolves.toEqual([]);
-    await expect(getActiveClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(getConnectedClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('gives 404 NOT_FOUND the second time', async () => {
@@ -646,12 +645,12 @@ describe('DELETE /classes/:classId/students/:id', () => {
   });
 });
 
-describe('getActiveClassStudent', () => {
+describe('getConnectedClassStudent', () => {
   it('returns the row while the link is active', async () => {
     const row = await linkStudent(student);
     await claim(student);
 
-    await expect(getActiveClassStudent(student.id, classId)).resolves.toMatchObject({
+    await expect(getConnectedClassStudent(student.id, classId)).resolves.toMatchObject({
       id: row.id,
       classId,
       studentUserId: student.id,
@@ -661,14 +660,14 @@ describe('getActiveClassStudent', () => {
   it('gives NOT_FOUND while the row awaits the claim', async () => {
     await linkStudent(student);
 
-    await expect(getActiveClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(getConnectedClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('gives NOT_FOUND for a claim the teacher has not linked', async () => {
     await addStudent({});
     await claim(student);
 
-    await expect(getActiveClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(getConnectedClassStudent(student.id, classId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('gives NOT_FOUND for another class, even when linked elsewhere', async () => {
@@ -677,11 +676,11 @@ describe('getActiveClassStudent', () => {
     const other = await createClass(teacher);
     await claim(student, other.publicId);
 
-    await expect(getActiveClassStudent(student.id, other.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(getConnectedClassStudent(student.id, other.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('gives NOT_FOUND for a class that does not exist', async () => {
-    await expect(getActiveClassStudent(student.id, randomUUID())).rejects.toMatchObject({
+    await expect(getConnectedClassStudent(student.id, randomUUID())).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });

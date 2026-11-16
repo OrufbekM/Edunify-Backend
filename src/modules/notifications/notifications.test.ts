@@ -27,7 +27,7 @@ beforeEach(async () => {
   student = await createTestUser('student', 'Account Name');
 
   const category = await api(teacher).post('/api/v1/categories', { name: 'Maths' });
-  schoolClass = (await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Algebra', name: null })).body;
+  schoolClass = (await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, name: 'Algebra' })).body;
   rowId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/students`, {
     fullName: 'Roster Name',
     studentPublicId: student.publicId,
@@ -103,8 +103,7 @@ describe('GET /notifications and /notifications/count', () => {
         lessonId,
         classId: schoolClass.id,
         lessonTitle: 'Equations',
-        classSubject: 'Algebra',
-        className: null,
+        className: 'Algebra',
         studentName: null,
         createdAt: expect.stringMatching(ISO_MILLIS),
       },

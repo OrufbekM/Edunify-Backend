@@ -18,8 +18,9 @@ export class SchoolClass extends Model<
   declare categoryId: string;
   // Denormalized from the category for authorization (contract section 5).
   declare teacherId: string;
-  declare subject: string;
-  declare name: string | null;
+  declare name: string;
+  // 0-based among the classes of its category (contract 4).
+  declare position: number;
   declare publicId: string;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
@@ -35,8 +36,8 @@ SchoolClass.init(
     },
     categoryId: { type: DataTypes.UUID, allowNull: false },
     teacherId: { type: DataTypes.UUID, allowNull: false },
-    subject: { type: DataTypes.TEXT, allowNull: false },
-    name: { type: DataTypes.TEXT, allowNull: true },
+    name: { type: DataTypes.TEXT, allowNull: false },
+    position: { type: DataTypes.INTEGER, allowNull: false },
     publicId: { type: DataTypes.CHAR(8), allowNull: false },
     createdAt: { type: DataTypes.DATE, allowNull: false },
     updatedAt: { type: DataTypes.DATE, allowNull: false },

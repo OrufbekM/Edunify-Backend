@@ -11,6 +11,7 @@ import {
   Unit,
 } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
+import { orderOutOfRange, placeAt, writePositions } from '../../lib/positions.js';
 import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
 import type { Upload } from '../../middleware/upload.js';
 import { getOwnClass, lockOwnClass } from '../classes/service.js';
@@ -22,7 +23,7 @@ import {
   removeStoredFiles,
   withStoredFile,
 } from '../files/service.js';
-import { getActiveClassStudent } from '../students/service.js';
+import { getConnectedClassStudent } from '../students/service.js';
 import { latestSubmissionOf, type SubmissionDto } from '../submissions/service.js';
 
 const UNIT_CAP = 100;
@@ -118,19 +119,13 @@ function lessonNotFound(): AppError {
   return new AppError('NOT_FOUND', 'Lesson not found');
 }
 
-function orderOutOfRange(max: number): AppError {
-  return new AppError('VALIDATION_ERROR', 'Order out of range', [
-    { path: 'order', message: `Must be between 0 and ${max}` },
-  ]);
-}
-
-// Teachers see their own classes, students the classes they have an active link to
+// Teachers see their own classes, students the classes they are connected to
 // (contract 5); both checks answer 404 'Class not found' otherwise.
 async function assertCanView(viewer: Viewer, classId: string, transaction?: Transaction) {
   if (viewer.role === 'teacher') {
     await getOwnClass(viewer.id, classId, transaction);
   } else {
-    await getActiveClassStudent(viewer.id, classId, transaction);
+    await getConnectedClassStudent(viewer.id, classId, transaction);
   }
 }
 
@@ -238,33 +233,6 @@ async function lessonIds(
   });
 
   return lessons.map((lesson) => lesson.id);
-}
-
-// Returns ids with `id` taken out (if it is there) and put back at index `order`.
-function placeAt(ids: string[], id: string, order: number): string[] {
-  const rest = ids.filter((other) => other !== id);
-
-  return [...rest.slice(0, order), id, ...rest.slice(order)];
-}
-
-// Gives the rows positions 0..n-1 in the order listed, so the group stays dense
-// (contract 4). Rows already in place are left alone.
-async function writePositions(
-  table: 'units' | 'lessons',
-  ids: string[],
-  transaction: Transaction,
-): Promise<void> {
-  if (ids.length === 0) {
-    return;
-  }
-
-  await sequelize.query(
-    `UPDATE ${table} AS t
-        SET position = v.n - 1, updated_at = now()
-       FROM unnest($ids::uuid[]) WITH ORDINALITY AS v(id, n)
-      WHERE t.id = v.id AND t.position <> v.n - 1`,
-    { bind: { ids }, transaction },
-  );
 }
 
 // A lesson may only join a unit of its own class. Anything else, another teacher's unit
@@ -500,10 +468,10 @@ export async function getLesson(viewer: Viewer, lessonId: string): Promise<Lesso
     throw lessonNotFound();
   }
 
-  let row: Awaited<ReturnType<typeof getActiveClassStudent>>;
+  let row: Awaited<ReturnType<typeof getConnectedClassStudent>>;
 
   try {
-    row = await getActiveClassStudent(viewer.id, lesson.classId);
+    row = await getConnectedClassStudent(viewer.id, lesson.classId);
   } catch (err) {
     throw err instanceof AppError && err.code === 'NOT_FOUND' ? lessonNotFound() : err;
   }

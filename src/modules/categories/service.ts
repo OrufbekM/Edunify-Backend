@@ -1,14 +1,16 @@
-import { DatabaseError, Transaction, UniqueConstraintError, col, fn } from 'sequelize';
+import { DatabaseError, Transaction, UniqueConstraintError } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
 import { Category, SchoolClass, User } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
+import { orderOutOfRange, placeAt, writePositions } from '../../lib/positions.js';
 
 const CATEGORY_CAP = 100;
 
 export interface CategoryDto {
   id: string;
   name: string;
+  order: number;
   classCount: number;
   createdAt: string;
 }
@@ -17,13 +19,15 @@ function toCategoryDto(category: Category, classCount: number): CategoryDto {
   return {
     id: category.id,
     name: category.name,
+    order: category.position,
     classCount,
     createdAt: category.createdAt.toISOString(),
   };
 }
 
-// Serializes cap checks per teacher. NO KEY UPDATE, so foreign-key checks on other
-// tables (a login inserting a refresh token, for example) don't have to wait for it.
+// Serializes cap checks and every change of order among a teacher's categories and classes.
+// NO KEY UPDATE, so foreign-key checks on other tables (a login inserting a refresh token,
+// for example) don't have to wait for it.
 export async function lockTeacher(teacherId: string, transaction: Transaction): Promise<void> {
   const teacher = await User.findByPk(teacherId, {
     attributes: ['id'],
@@ -50,19 +54,34 @@ export async function getOwnCategory(
   return category;
 }
 
+// The teacher's category ids in order.
+async function categoryIds(teacherId: string, transaction: Transaction): Promise<string[]> {
+  const categories = await Category.findAll({
+    attributes: ['id'],
+    where: { teacherId },
+    order: [
+      ['position', 'ASC'],
+      ['id', 'ASC'],
+    ],
+    transaction,
+  });
+
+  return categories.map((category) => category.id);
+}
+
 // The unique index on (teacher_id, lower(name)) is the only name check, so a race can't
 // slip past it.
 function toNameTaken(err: unknown): unknown {
   return err instanceof UniqueConstraintError ? new AppError('CATEGORY_NAME_TAKEN') : err;
 }
 
+// Sorted by order (contract 8.2).
 export async function listCategories(teacherId: string): Promise<CategoryDto[]> {
   const [categories, counts] = await Promise.all([
     Category.findAll({
       where: { teacherId },
       order: [
-        [fn('lower', col('name')), 'ASC'],
-        ['name', 'ASC'],
+        ['position', 'ASC'],
         ['id', 'ASC'],
       ],
     }),
@@ -73,6 +92,7 @@ export async function listCategories(teacherId: string): Promise<CategoryDto[]> 
   return categories.map((category) => toCategoryDto(category, classCounts.get(category.id) ?? 0));
 }
 
+// Placed last (contract 8.2).
 export async function createCategory(
   teacherId: string,
   input: { name: string },
@@ -81,11 +101,12 @@ export async function createCategory(
     return await sequelize.transaction(async (transaction) => {
       await lockTeacher(teacherId, transaction);
 
-      if ((await Category.count({ where: { teacherId }, transaction })) >= CATEGORY_CAP) {
+      const count = await Category.count({ where: { teacherId }, transaction });
+      if (count >= CATEGORY_CAP) {
         throw new AppError('LIMIT_REACHED', `A teacher has at most ${CATEGORY_CAP} categories`);
       }
 
-      const category = await Category.create({ teacherId, name: input.name }, { transaction });
+      const category = await Category.create({ teacherId, name: input.name, position: count }, { transaction });
 
       return toCategoryDto(category, 0);
     });
@@ -94,20 +115,37 @@ export async function createCategory(
   }
 }
 
-export async function renameCategory(
+// `order` is the category's new 0-based index among the teacher's categories (contract 8.2).
+export async function updateCategory(
   teacherId: string,
   categoryId: string,
-  input: { name: string },
+  input: { name?: string; order?: number },
 ): Promise<CategoryDto> {
-  const category = await getOwnCategory(teacherId, categoryId);
-
   try {
-    await category.update({ name: input.name });
+    return await sequelize.transaction(async (transaction) => {
+      await lockTeacher(teacherId, transaction);
+      const category = await getOwnCategory(teacherId, categoryId, transaction);
+
+      if (input.name !== undefined) {
+        await category.update({ name: input.name }, { transaction });
+      }
+
+      if (input.order !== undefined) {
+        const ids = await categoryIds(teacherId, transaction);
+
+        if (input.order > ids.length - 1) {
+          throw orderOutOfRange(ids.length - 1);
+        }
+
+        await writePositions('categories', placeAt(ids, category.id, input.order), transaction);
+        await category.reload({ transaction });
+      }
+
+      return toCategoryDto(category, await SchoolClass.count({ where: { categoryId }, transaction }));
+    });
   } catch (err) {
     throw toNameTaken(err);
   }
-
-  return toCategoryDto(category, await SchoolClass.count({ where: { categoryId } }));
 }
 
 // PostgreSQL reports a RESTRICT violation as 23001, which Sequelize leaves as a plain
@@ -116,14 +154,20 @@ function isRestrictViolation(err: unknown): boolean {
   return err instanceof DatabaseError && (err.parent as { code?: string }).code === '23001';
 }
 
+// The categories after it move up one, so the order stays dense (contract 4).
 export async function deleteCategory(teacherId: string, categoryId: string): Promise<void> {
-  const category = await getOwnCategory(teacherId, categoryId);
+  await sequelize.transaction(async (transaction) => {
+    await lockTeacher(teacherId, transaction);
+    const category = await getOwnCategory(teacherId, categoryId, transaction);
 
-  // The RESTRICT foreign key on classes.category_id is the only check, so a class created
-  // at the same moment can't slip past it.
-  try {
-    await category.destroy();
-  } catch (err) {
-    throw isRestrictViolation(err) ? new AppError('CATEGORY_NOT_EMPTY') : err;
-  }
+    // The RESTRICT foreign key on classes.category_id is the only check, so a class created
+    // at the same moment can't slip past it.
+    try {
+      await category.destroy({ transaction });
+    } catch (err) {
+      throw isRestrictViolation(err) ? new AppError('CATEGORY_NOT_EMPTY') : err;
+    }
+
+    await writePositions('categories', await categoryIds(teacherId, transaction), transaction);
+  });
 }

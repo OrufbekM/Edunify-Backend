@@ -10,7 +10,7 @@ import {
 import { sequelize } from '../index.js';
 
 // A roster row. Grades and submissions hang off this, never off the user account
-// (contract section 4), so re-linking keeps the work.
+// (contract section 4), so reconnecting keeps the work.
 export class ClassStudent extends Model<
   InferAttributes<ClassStudent>,
   InferCreationAttributes<ClassStudent>
@@ -18,7 +18,7 @@ export class ClassStudent extends Model<
   declare id: CreationOptional<string>;
   declare classId: string;
   declare fullName: string;
-  // The teacher side of the link; null means linkState 'no_id' (contract section 6.2).
+  // The teacher side of the connection; null means 'not_connected' (contract section 6.2).
   declare studentUserId: string | null;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;

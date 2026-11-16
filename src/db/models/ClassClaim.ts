@@ -9,7 +9,7 @@ import {
 
 import { sequelize } from '../index.js';
 
-// The student side of the link: created when the student enters a class ID
+// The student side of the connection: created when the student enters a class ID
 // (contract section 6.2). Teachers never see these rows.
 export class ClassClaim extends Model<
   InferAttributes<ClassClaim>,

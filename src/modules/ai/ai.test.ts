@@ -71,7 +71,7 @@ afterEach(() => {
 
 async function createClass(owner: TestUser) {
   const category = await api(owner).post('/api/v1/categories', { name: `C ${randomUUID()}` });
-  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Maths', name: null }))
+  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths' }))
     .body as { id: string; publicId: string };
 }
 

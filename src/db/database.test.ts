@@ -158,13 +158,13 @@ describe('insertWithPublicId on real tables', () => {
       publicId: null,
       status: 'active',
     });
-    const category = await Category.create({ teacherId: teacher.id, name: 'Algebra' });
+    const category = await Category.create({ teacherId: teacher.id, name: 'Algebra', position: 0 });
     const createClass = (publicId: string) =>
       SchoolClass.create({
         categoryId: category.id,
         teacherId: teacher.id,
-        subject: 'Maths',
-        name: null,
+        name: 'Maths',
+        position: 0,
         publicId,
       });
     await createClass('taken000');

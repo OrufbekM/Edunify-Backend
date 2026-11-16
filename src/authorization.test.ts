@@ -134,7 +134,7 @@ const MATRIX: Record<string, Case> = {
   'POST /api/v1/classes': {
     role: 'teacher',
     ok: [['owner', 201]],
-    send: (u, f) => call('post', `${V1}/classes`, u, { categoryId: f.categoryId, subject: 'Physics' }),
+    send: (u, f) => call('post', `${V1}/classes`, u, { categoryId: f.categoryId, name: 'Physics' }),
   },
   'GET /api/v1/classes/:id': {
     role: 'teacher',
@@ -146,7 +146,7 @@ const MATRIX: Record<string, Case> = {
     role: 'teacher',
     resource: 'classId',
     ok: [['owner', 200]],
-    send: (u, f) => call('patch', `${V1}/classes/${f.classId}`, u, { subject: 'Geometry' }),
+    send: (u, f) => call('patch', `${V1}/classes/${f.classId}`, u, { name: 'Geometry' }),
   },
   'DELETE /api/v1/classes/:id': {
     role: 'teacher',
@@ -427,7 +427,7 @@ async function buildFixture(): Promise<Fixture> {
   const { owner, student, otherStudent } = callers;
   const category = await api(owner).post('/api/v1/categories', { name: 'Maths' });
   const emptyCategory = await api(owner).post('/api/v1/categories', { name: 'Empty' });
-  const schoolClass = await api(owner).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Algebra' });
+  const schoolClass = await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name: 'Algebra' });
   const classId = schoolClass.body.id as string;
   const classPublicId = schoolClass.body.publicId as string;
   const row = await api(owner).post(`/api/v1/classes/${classId}/students`, {

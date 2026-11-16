@@ -38,7 +38,7 @@ function submissionNotFound(): AppError {
   return new AppError('NOT_FOUND', 'Submission not found');
 }
 
-// Every roster row, whatever its link state, sorted like the roster, each with its latest
+// Every roster row, whatever its connection state, sorted like the roster, each with its latest
 // version built for a teacher, so with aiSuggestion (contract 8.9). One REPEATABLE READ
 // snapshot, so the homework, the roster and the submissions agree with each other.
 export async function getGrading(teacherId: string, lessonId: string): Promise<GradingDto> {

@@ -42,7 +42,7 @@ let fixture: Fixture;
 
 async function createClass(): Promise<{ id: string; publicId: string }> {
   const category = await api(teacher).post('/api/v1/categories', { name: `C ${Math.random()}` });
-  return (await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Maths' })).body;
+  return (await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths' })).body;
 }
 
 async function addLesson(classId: string, title: string, unitId: string | null = null): Promise<string> {

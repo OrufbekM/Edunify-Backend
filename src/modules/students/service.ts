@@ -1,7 +1,7 @@
 import { Op, QueryTypes, Transaction, UniqueConstraintError, literal } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
-import { ClassClaim, ClassStudent, LinkAudit, SchoolClass, User } from '../../db/models/index.js';
+import { ClassClaim, ClassStudent, ConnectionAudit, SchoolClass, User } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
 import { getOwnClass, lockOwnClass } from '../classes/service.js';
 import { deleteFileRows, pageFileIds, removeStoredFiles } from '../files/service.js';
@@ -9,25 +9,24 @@ import { deleteFileRows, pageFileIds, removeStoredFiles } from '../files/service
 const STUDENT_CAP = 200;
 
 // Contract section 3. Computed by query on every read, never stored (contract 6.2).
-export type LinkState = 'no_id' | 'awaiting_student' | 'active';
+export type ConnectionState = 'not_connected' | 'awaiting_student' | 'connected';
 
 export interface ClassStudentDto {
   id: string;
   fullName: string;
-  // The linked account's publicId, so the teacher sees the ID as it is stored.
+  // The connected account's publicId, so the teacher sees the ID as it is stored.
   studentPublicId: string | null;
-  linkState: LinkState;
+  connectionState: ConnectionState;
 }
 
 export interface StudentClassDto {
   id: string;
-  subject: string;
-  name: string | null;
+  name: string;
   teacherName: string;
   classStudentId: string;
 }
 
-// The claim join feeds linkState and nothing else: teachers never see claims (contract 6.2).
+// The claim join feeds connectionState and nothing else: teachers never see claims (contract 6.2).
 // Sorted by fullName, ignoring case.
 export async function rosterRows(
   classId: string,
@@ -40,10 +39,10 @@ export async function rosterRows(
             cs.full_name AS "fullName",
             u.public_id AS "studentPublicId",
             CASE
-              WHEN cs.student_user_id IS NULL THEN 'no_id'
+              WHEN cs.student_user_id IS NULL THEN 'not_connected'
               WHEN cc.id IS NULL THEN 'awaiting_student'
-              ELSE 'active'
-            END AS "linkState"
+              ELSE 'connected'
+            END AS "connectionState"
        FROM class_students cs
        LEFT JOIN users u ON u.id = cs.student_user_id
        LEFT JOIN class_claims cc
@@ -90,7 +89,7 @@ async function findStudentAccount(publicId: string, transaction: Transaction): P
 }
 
 // The unique index on (class_id, student_user_id) is the only check, so two requests
-// linking the same account at once can't both pass it.
+// connecting the same account at once can't both pass it.
 function toIdInUse(err: unknown): unknown {
   return err instanceof UniqueConstraintError ? new AppError('STUDENT_ID_IN_USE') : err;
 }
@@ -101,8 +100,8 @@ export async function listStudents(teacherId: string, classId: string): Promise<
   return rosterRows(classId);
 }
 
-// Not audited: link_audit records changes to a row's link (contract 6.3), and a new row
-// has no earlier link to change.
+// Not audited: connection_audit records changes to a row's account (contract 6.3), and a
+// new row has no earlier account to change.
 export async function addStudent(
   teacherId: string,
   classId: string,
@@ -132,7 +131,7 @@ export async function addStudent(
   }
 }
 
-// A new studentPublicId replaces the linked account, and null unlinks; either one is
+// A new studentPublicId replaces the connected account, and null disconnects; either one is
 // audited in the same transaction (contract 6.3). The row keeps its id, so its submissions
 // and grades stay where they are.
 export async function updateStudent(
@@ -145,7 +144,7 @@ export async function updateStudent(
     return await sequelize.transaction(async (transaction) => {
       await getOwnClass(teacherId, classId, transaction);
 
-      // Locked so that two simultaneous re-links can't both record the same old account.
+      // Locked so that two simultaneous reconnects can't both record the same old account.
       const row = await ClassStudent.findOne({
         where: { id: studentId, classId },
         lock: Transaction.LOCK.NO_KEY_UPDATE,
@@ -170,9 +169,9 @@ export async function updateStudent(
 
       await row.save({ transaction });
 
-      // Sending the account that is already linked changes nothing, so nothing is audited.
+      // Sending the account that is already set changes nothing, so nothing is audited.
       if (row.studentUserId !== oldUserId) {
-        await LinkAudit.create(
+        await ConnectionAudit.create(
           {
             classStudentId: row.id,
             oldUserId,
@@ -222,8 +221,8 @@ export async function deleteStudent(
   await removeStoredFiles(storageKeys);
 }
 
-// The same answer for every existing class, whether or not the teacher has linked the
-// student, so a claim reveals nothing about the roster (contract 8.5).
+// The same answer for every existing class, whether or not the teacher has connected
+// the student, so a claim reveals nothing about the roster (contract 8.5).
 export async function claimClass(userId: string, input: { classPublicId: string }): Promise<void> {
   await sequelize.transaction(async (transaction) => {
     // KEY SHARE keeps the class from being deleted before the claim is written.
@@ -246,14 +245,14 @@ export async function claimClass(userId: string, input: { classPublicId: string 
   });
 }
 
-// Active links only (contract 6.2); the class publicId stays with the teacher (contract 6.1).
+// Connected classes only (contract 6.2), sorted by name; the class publicId stays with the
+// teacher (contract 6.1).
 export async function listMyClasses(
   userId: string,
   transaction?: Transaction,
 ): Promise<StudentClassDto[]> {
   return sequelize.query<StudentClassDto>(
     `SELECT c.id,
-            c.subject,
             c.name,
             t.first_name || ' ' || t.last_name AS "teacherName",
             cs.id AS "classStudentId"
@@ -263,18 +262,19 @@ export async function listMyClasses(
        JOIN classes c ON c.id = cs.class_id
        JOIN users t ON t.id = c.teacher_id
       WHERE cs.student_user_id = $userId
-      ORDER BY lower(c.subject), c.subject, lower(c.name), c.name, c.id`,
+      ORDER BY lower(c.name), c.name, c.id`,
     { bind: { userId }, type: QueryTypes.SELECT, transaction },
   );
 }
 
 // The gate for every student-facing service: the caller's row in the class, and only
 // while the caller has also claimed the class. Anything else is 404, so a student can't
-// tell a class they aren't linked to from one that doesn't exist (contract 2.4).
+// tell a class they aren't connected to from one that doesn't exist (contract 2.4).
 //
-// With `lock`, the row is locked FOR NO KEY UPDATE, so a re-link or unlink of it waits for
-// the caller's transaction, or has already committed and the link is checked against it.
-export async function getActiveClassStudent(
+// With `lock`, the row is locked FOR NO KEY UPDATE, so a reconnect or disconnect of it waits
+// for the caller's transaction, or has already committed and the connection is checked
+// against it.
+export async function getConnectedClassStudent(
   userId: string,
   classId: string,
   transaction?: Transaction,

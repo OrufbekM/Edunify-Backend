@@ -27,8 +27,16 @@ async function createCategory(user: TestUser, name: string): Promise<string> {
   return res.body.id;
 }
 
+async function names(user = teacher): Promise<string[]> {
+  return (await api(user).get('/api/v1/categories')).body.items.map((item: { name: string }) => item.name);
+}
+
+async function orders(user = teacher): Promise<number[]> {
+  return (await api(user).get('/api/v1/categories')).body.items.map((item: { order: number }) => item.order);
+}
+
 async function addClass(user: TestUser, categoryId: string): Promise<string> {
-  const res = await api(user).post('/api/v1/classes', { categoryId, subject: 'Maths' });
+  const res = await api(user).post('/api/v1/classes', { categoryId, name: 'Maths' });
   expect(res.status).toBe(201);
   return res.body.id;
 }
@@ -46,19 +54,13 @@ describe('GET /categories', () => {
     expect(res.body).toEqual({ items: [] });
   });
 
-  it('sorts by name, ignoring letter case', async () => {
+  it('sorts by order, which is the order they were made in until the teacher moves them', async () => {
     for (const name of ['beta', 'Gamma', 'alpha 2', 'Alpha']) {
       await createCategory(teacher, name);
     }
 
-    const res = await api(teacher).get('/api/v1/categories');
-
-    expect(res.body.items.map((item: { name: string }) => item.name)).toEqual([
-      'Alpha',
-      'alpha 2',
-      'beta',
-      'Gamma',
-    ]);
+    expect(await names()).toEqual(['beta', 'Gamma', 'alpha 2', 'Alpha']);
+    expect(await orders()).toEqual([0, 1, 2, 3]);
   });
 
   it('returns exactly the contract Category with its class count', async () => {
@@ -70,8 +72,8 @@ describe('GET /categories', () => {
     const res = await api(teacher).get('/api/v1/categories');
 
     expect(res.body.items).toEqual([
-      { id: busy, name: 'Busy', classCount: 2, createdAt: expect.stringMatching(ISO_MILLIS) },
-      { id: expect.any(String), name: 'Empty', classCount: 0, createdAt: expect.any(String) },
+      { id: busy, name: 'Busy', order: 0, classCount: 2, createdAt: expect.stringMatching(ISO_MILLIS) },
+      { id: expect.any(String), name: 'Empty', order: 1, classCount: 0, createdAt: expect.any(String) },
     ]);
   });
 
@@ -94,9 +96,17 @@ describe('POST /categories', () => {
     expect(res.body).toEqual({
       id: expect.any(String),
       name: 'Algebra',
+      order: 0,
       classCount: 0,
       createdAt: expect.stringMatching(ISO_MILLIS),
     });
+  });
+
+  it('places each new category last', async () => {
+    await createCategory(teacher, 'First');
+    await createCategory(otherTeacher, 'Not counted');
+
+    expect((await api(teacher).post('/api/v1/categories', { name: 'Second' })).body.order).toBe(1);
   });
 
   it('gives CATEGORY_NAME_TAKEN for the same name in another letter case', async () => {
@@ -145,7 +155,7 @@ describe('POST /categories', () => {
 
   it('gives LIMIT_REACHED for a 101st category', async () => {
     await Category.bulkCreate(
-      Array.from({ length: 100 }, (_, index) => ({ teacherId: teacher.id, name: `C${index}` })),
+      Array.from({ length: 100 }, (_, index) => ({ teacherId: teacher.id, name: `C${index}`, position: index })),
     );
 
     expectError(
@@ -157,7 +167,7 @@ describe('POST /categories', () => {
 
   it('never lets simultaneous creates pass the cap together', async () => {
     await Category.bulkCreate(
-      Array.from({ length: 95 }, (_, index) => ({ teacherId: teacher.id, name: `C${index}` })),
+      Array.from({ length: 95 }, (_, index) => ({ teacherId: teacher.id, name: `C${index}`, position: index })),
     );
 
     const results = await Promise.all(
@@ -169,6 +179,7 @@ describe('POST /categories', () => {
     expect(results.filter((res) => res.status === 201)).toHaveLength(5);
     expect(results.filter((res) => res.body.error?.code === 'LIMIT_REACHED')).toHaveLength(5);
     await expect(Category.count({ where: { teacherId: teacher.id } })).resolves.toBe(100);
+    expect(await orders()).toEqual(Array.from({ length: 100 }, (_, index) => index));
   });
 });
 
@@ -209,6 +220,78 @@ describe('PATCH /categories/:id', () => {
       'VALIDATION_ERROR',
     );
   });
+
+  describe('order', () => {
+    let ids: string[];
+
+    beforeEach(async () => {
+      ids = [];
+      for (const name of ['A', 'B', 'C', 'D']) {
+        ids.push(await createCategory(teacher, name));
+      }
+    });
+
+    it.each([
+      ['to the front', 3, 0, ['D', 'A', 'B', 'C']],
+      ['to the end', 0, 3, ['B', 'C', 'D', 'A']],
+      ['one step right', 1, 2, ['A', 'C', 'B', 'D']],
+      ['one step left', 2, 1, ['A', 'C', 'B', 'D']],
+      ['to where it already is', 2, 2, ['A', 'B', 'C', 'D']],
+    ])('moves a category %s and renumbers the rest densely', async (_name, from, to, expected) => {
+      const res = await api(teacher).patch(`/api/v1/categories/${ids[from]}`, { order: to });
+
+      expect(res.status).toBe(200);
+      expect(res.body.order).toBe(to);
+      expect(await names()).toEqual(expected);
+      expect(await orders()).toEqual([0, 1, 2, 3]);
+    });
+
+    it('renames and moves in one request', async () => {
+      const res = await api(teacher).patch(`/api/v1/categories/${ids[0]}`, { name: 'Z', order: 3 });
+
+      expect(res.body).toMatchObject({ name: 'Z', order: 3 });
+      expect(await names()).toEqual(['B', 'C', 'D', 'Z']);
+    });
+
+    it('changes nothing for an empty body', async () => {
+      expect((await api(teacher).patch(`/api/v1/categories/${ids[1]}`, {})).body).toMatchObject({ name: 'B', order: 1 });
+      expect(await names()).toEqual(['A', 'B', 'C', 'D']);
+    });
+
+    it.each([
+      ['past the last category', { order: 4 }],
+      ['negative', { order: -1 }],
+      ['not a whole number', { order: 1.5 }],
+      ['a string', { order: '1' }],
+    ])('gives VALIDATION_ERROR for an order %s and changes nothing', async (_name, body) => {
+      const res = await api(teacher).patch(`/api/v1/categories/${ids[0]}`, body);
+
+      expectError(res, 400, 'VALIDATION_ERROR');
+      expect(res.body.error.details).toEqual([{ path: 'order', message: expect.any(String) }]);
+      expect(await names()).toEqual(['A', 'B', 'C', 'D']);
+    });
+
+    it('applies simultaneous moves one after the other, keeping the order dense', async () => {
+      await Promise.all([
+        api(teacher).patch(`/api/v1/categories/${ids[0]}`, { order: 3 }),
+        api(teacher).patch(`/api/v1/categories/${ids[3]}`, { order: 0 }),
+        api(teacher).patch(`/api/v1/categories/${ids[1]}`, { order: 2 }),
+      ]);
+
+      expect((await names()).sort()).toEqual(['A', 'B', 'C', 'D']);
+      expect(await orders()).toEqual([0, 1, 2, 3]);
+    });
+
+    it("never touches another teacher's order", async () => {
+      await createCategory(otherTeacher, 'X');
+      await createCategory(otherTeacher, 'Y');
+
+      await api(teacher).patch(`/api/v1/categories/${ids[3]}`, { order: 0 });
+
+      expect(await names(otherTeacher)).toEqual(['X', 'Y']);
+      expect(await orders(otherTeacher)).toEqual([0, 1]);
+    });
+  });
 });
 
 describe('DELETE /categories/:id', () => {
@@ -222,11 +305,24 @@ describe('DELETE /categories/:id', () => {
     await expect(Category.findByPk(id)).resolves.toBeNull();
   });
 
+  it('moves the categories after it up one', async () => {
+    await createCategory(teacher, 'A');
+    const doomed = await createCategory(teacher, 'B');
+    await createCategory(teacher, 'C');
+    await createCategory(teacher, 'D');
+
+    await api(teacher).delete(`/api/v1/categories/${doomed}`);
+
+    expect(await names()).toEqual(['A', 'C', 'D']);
+    expect(await orders()).toEqual([0, 1, 2]);
+  });
+
   it('gives CATEGORY_NOT_EMPTY while the category has classes', async () => {
     const id = await createCategory(teacher, 'Busy');
     const classId = await addClass(teacher, id);
 
     expectError(await api(teacher).delete(`/api/v1/categories/${id}`), 409, 'CATEGORY_NOT_EMPTY');
+    expect(await orders()).toEqual([0]);
 
     await api(teacher).delete(`/api/v1/classes/${classId}`);
     expect((await api(teacher).delete(`/api/v1/categories/${id}`)).status).toBe(204);

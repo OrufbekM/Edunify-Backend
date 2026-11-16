@@ -16,6 +16,8 @@ export class Category extends Model<
   declare id: CreationOptional<string>;
   declare teacherId: string;
   declare name: string;
+  // 0-based among the teacher's categories (contract 4).
+  declare position: number;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 }
@@ -30,6 +32,7 @@ Category.init(
     },
     teacherId: { type: DataTypes.UUID, allowNull: false },
     name: { type: DataTypes.TEXT, allowNull: false },
+    position: { type: DataTypes.INTEGER, allowNull: false },
     createdAt: { type: DataTypes.DATE, allowNull: false },
     updatedAt: { type: DataTypes.DATE, allowNull: false },
   },

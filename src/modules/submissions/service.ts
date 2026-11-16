@@ -22,7 +22,7 @@ import type { Upload } from '../../middleware/upload.js';
 import { getOwnClass } from '../classes/service.js';
 import { createFileRecord, withStoredFiles } from '../files/service.js';
 import { notify, removeUnread } from '../notifications/service.js';
-import { getActiveClassStudent } from '../students/service.js';
+import { getConnectedClassStudent } from '../students/service.js';
 
 const VERSION_CAP = 30;
 
@@ -81,7 +81,7 @@ export interface SubmissionVersionDto {
 export interface StudentSubmissionItemDto {
   submission: SubmissionDto;
   lesson: { id: string; title: string };
-  class: { id: string; subject: string; name: string | null };
+  class: { id: string; name: string };
 }
 
 interface SubmissionRow {
@@ -351,7 +351,7 @@ async function classIdOf(homework: Homework, transaction?: Transaction): Promise
 }
 
 // For the route to call before multer reads a body (plan, Phase 8): the homework exists and
-// the caller has an active link to its class. Returns the type, which picks the body.
+// the caller is connected to its class. Returns the type, which picks the body.
 export async function assertCanSubmit(userId: string, homeworkId: string): Promise<HomeworkType> {
   const homework = await Homework.findByPk(homeworkId, { attributes: ['lessonId', 'type'] });
 
@@ -359,7 +359,7 @@ export async function assertCanSubmit(userId: string, homeworkId: string): Promi
     throw homeworkNotFound();
   }
 
-  await notFoundAs(getActiveClassStudent(userId, await classIdOf(homework)), homeworkNotFound);
+  await notFoundAs(getConnectedClassStudent(userId, await classIdOf(homework)), homeworkNotFound);
 
   return homework.type;
 }
@@ -367,7 +367,7 @@ export async function assertCanSubmit(userId: string, homeworkId: string): Promi
 // One transaction (plan, Phase 8). Locks the homework FOR SHARE first: a type change and
 // every delete that collects this homework's files take FOR UPDATE on it, so they and this
 // submission go one after the other. Then the roster row, which numbers this student's
-// versions one at a time and keeps a re-link or unlink from slipping past the link check.
+// versions one at a time and keeps a reconnect or disconnect from slipping past the connection check.
 export async function createSubmission(
   userId: string,
   homeworkId: string,
@@ -398,7 +398,7 @@ export async function createSubmission(
 
         const classId = await classIdOf(homework, transaction);
         const row: ClassStudent = await notFoundAs(
-          getActiveClassStudent(userId, classId, transaction, { lock: true }),
+          getConnectedClassStudent(userId, classId, transaction, { lock: true }),
           homeworkNotFound,
         );
         const previous = await Submission.findOne({
@@ -469,7 +469,7 @@ export async function createSubmission(
 }
 
 // Teacher: a submission in an own class. Student: one of their own roster row's, while the
-// link is active (contract 5).
+// connection holds (contract 5).
 export async function getSubmission(
   viewer: { id: string; role: Role },
   submissionId: string,
@@ -483,7 +483,7 @@ export async function getSubmission(
   if (viewer.role === 'teacher') {
     await notFoundAs(getOwnClass(viewer.id, row.classId), submissionNotFound);
   } else {
-    const own = await notFoundAs(getActiveClassStudent(viewer.id, row.classId), submissionNotFound);
+    const own = await notFoundAs(getConnectedClassStudent(viewer.id, row.classId), submissionNotFound);
 
     if (own.id !== row.classStudentId) {
       throw submissionNotFound();
@@ -499,7 +499,7 @@ export async function getSubmission(
   return { ...(dto as SubmissionDto), versions: versions.map(toVersionDto) };
 }
 
-// The latest version per homework, newest first, from active links only (contract 8.8).
+// The latest version per homework, newest first, from connected classes only (contract 8.8).
 export async function listMySubmissions(
   userId: string,
   filter: { classId?: string },
@@ -509,14 +509,12 @@ export async function listMySubmissions(
     lessonId: string;
     lessonTitle: string;
     classId: string;
-    classSubject: string;
-    className: string | null;
+    className: string;
   }>(
     `SELECT s.id AS "submissionId",
             l.id AS "lessonId",
             l.title AS "lessonTitle",
             c.id AS "classId",
-            c.subject AS "classSubject",
             c.name AS "className"
        FROM submissions s
        JOIN class_students cs ON cs.id = s.class_student_id
@@ -550,12 +548,12 @@ export async function listMySubmissions(
   return items.map((item) => ({
     submission: dtos.get(item.submissionId) as SubmissionDto,
     lesson: { id: item.lessonId, title: item.lessonTitle },
-    class: { id: item.classId, subject: item.classSubject, name: item.className },
+    class: { id: item.classId, name: item.className },
   }));
 }
 
 // A student's latest version for LessonDetail.mySubmission, or null (contract 8.6). The
-// caller has already checked the link.
+// caller has already checked the connection.
 export async function latestSubmissionOf(
   classStudentId: string,
   homeworkId: string,

@@ -5,7 +5,7 @@ import type { SubmissionStatus } from '../../db/models/enums.js';
 import { Unit } from '../../db/models/index.js';
 import { getOwnClass } from '../classes/service.js';
 import { toUnitDto, type UnitDto } from '../lessons/service.js';
-import { listMyClasses, rosterRows, type LinkState } from '../students/service.js';
+import { listMyClasses, rosterRows, type ConnectionState } from '../students/service.js';
 import type { Grade } from '../submissions/service.js';
 
 // Contract section 3: 'empty' means no submission yet.
@@ -27,7 +27,7 @@ export interface JournalCellDto {
 export interface JournalRowDto {
   classStudentId: string;
   fullName: string;
-  linkState: LinkState;
+  connectionState: ConnectionState;
   cells: JournalCellDto[];
   average: number | null;
 }
@@ -39,7 +39,7 @@ export interface JournalDto {
 }
 
 export interface StudentGradesItemDto {
-  class: { id: string; subject: string; name: string | null };
+  class: { id: string; name: string };
   columns: JournalColumnDto[];
   cells: JournalCellDto[];
   average: number | null;
@@ -151,7 +151,7 @@ function inSnapshot<T>(work: (transaction: Transaction) => Promise<T>): Promise<
   );
 }
 
-// Every roster row, sorted like the roster, with its linkState (contract 8.10).
+// Every roster row, sorted like the roster, with its connectionState (contract 8.10).
 export async function getJournal(teacherId: string, classId: string): Promise<JournalDto> {
   return inSnapshot(async (transaction) => {
     await getOwnClass(teacherId, classId, transaction);
@@ -177,7 +177,7 @@ export async function getJournal(teacherId: string, classId: string): Promise<Jo
       rows: roster.map((row) => ({
         classStudentId: row.id,
         fullName: row.fullName,
-        linkState: row.linkState,
+        connectionState: row.connectionState,
         cells: cellsOf(columns, marks.get(row.id)),
         average: marks.get(row.id)?.average ?? null,
       })),
@@ -185,7 +185,7 @@ export async function getJournal(teacherId: string, classId: string): Promise<Jo
   });
 }
 
-// One item per class with an active link, sorted like GET /student/classes, holding only
+// One item per connected class, sorted like GET /student/classes, holding only
 // the caller's own row (contract 8.10). A class without homework still appears.
 export async function listMyGrades(userId: string): Promise<StudentGradesItemDto[]> {
   return inSnapshot(async (transaction) => {
@@ -209,7 +209,7 @@ export async function listMyGrades(userId: string): Promise<StudentGradesItemDto
       const mine = marks.get(item.classStudentId);
 
       return {
-        class: { id: item.id, subject: item.subject, name: item.name },
+        class: { id: item.id, name: item.name },
         columns: own.map(toColumnDto),
         cells: cellsOf(own, mine),
         average: mine?.average ?? null,

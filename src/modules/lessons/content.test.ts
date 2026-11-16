@@ -35,7 +35,7 @@ beforeEach(async () => {
   student = await createTestUser('student');
 
   const category = await api(teacher).post('/api/v1/categories', { name: 'Maths' });
-  const created = await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, subject: 'Maths' });
+  const created = await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths' });
   schoolClass = created.body;
   lessonId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Fractions' })).body.id;
 });

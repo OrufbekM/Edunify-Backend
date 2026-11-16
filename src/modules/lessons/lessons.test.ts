@@ -29,9 +29,12 @@ async function createClass(user: TestUser): Promise<ClassRef> {
 
   const res = await api(user).post('/api/v1/classes', {
     categoryId: category.body.id,
-    subject: 'Maths',
+    name: 'Maths',
   });
   expect(res.status).toBe(201);
+  // These tests cover the v1 outline from an empty class, so the Unit 1 every new class gets
+  // (contract 8.3, tested in classes.test.ts) is removed. Plan Phase 15 rewrites them.
+  await Unit.destroy({ where: { classId: res.body.id } });
   return res.body;
 }
 
