@@ -22,6 +22,8 @@ export class SchoolClass extends Model<
   // 0-based among the classes of its category (contract 4).
   declare position: number;
   declare publicId: string;
+  // The class group it belongs to, if any (contract 4.1).
+  declare groupId: CreationOptional<string | null>;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 }
@@ -39,6 +41,7 @@ SchoolClass.init(
     name: { type: DataTypes.TEXT, allowNull: false },
     position: { type: DataTypes.INTEGER, allowNull: false },
     publicId: { type: DataTypes.CHAR(8), allowNull: false },
+    groupId: { type: DataTypes.UUID, allowNull: true, defaultValue: null },
     createdAt: { type: DataTypes.DATE, allowNull: false },
     updatedAt: { type: DataTypes.DATE, allowNull: false },
   },

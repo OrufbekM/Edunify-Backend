@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
+import { classQuerySchema, emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { aiGradeLimiter, generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
@@ -23,9 +23,10 @@ aiRouter.post(
   aiGradeLimiter,
   async (req, res) => {
     const { lessonId } = lessonParams.parse(req.params);
+    const { classId } = classQuerySchema.parse(req.query);
     const body = aiGradeBody.parse(req.body);
 
-    res.status(202).json(await ai.startAiGrading(getAuth(req).id, lessonId, body));
+    res.status(202).json(await ai.startAiGrading(getAuth(req).id, classId, lessonId, body));
   },
 );
 

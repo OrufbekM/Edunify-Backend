@@ -1,7 +1,7 @@
 import { Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
-import { Category, ClassStudent, SchoolClass, Unit } from '../../db/models/index.js';
+import { Category, ClassStudent, ClassUnit, SchoolClass, Unit } from '../../db/models/index.js';
 import { AppError } from '../../lib/errors.js';
 import { orderOutOfRange, writePositions } from '../../lib/positions.js';
 import { insertWithPublicId } from '../../lib/publicId.js';
@@ -175,7 +175,8 @@ export async function createClass(
         },
         { transaction },
       );
-      await Unit.create({ classId: schoolClass.id, title: FIRST_UNIT_TITLE, position: 0 }, { transaction });
+      const unit = await Unit.create({ classId: schoolClass.id, groupId: null, title: FIRST_UNIT_TITLE }, { transaction });
+      await ClassUnit.create({ classId: schoolClass.id, unitId: unit.id, position: 0 }, { transaction });
 
       return toClassDto(schoolClass, 0);
     }),

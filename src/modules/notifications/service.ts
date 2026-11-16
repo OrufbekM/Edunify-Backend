@@ -66,7 +66,7 @@ const UNREAD_FOR_USER = `
      JOIN class_students cs ON cs.id = s.class_student_id
      JOIN homeworks h ON h.id = s.homework_id
      JOIN lessons l ON l.id = h.lesson_id
-     JOIN classes c ON c.id = l.class_id
+     JOIN classes c ON c.id = cs.class_id
     WHERE n.user_id = $userId
       AND n.read_at IS NULL
       AND (c.teacher_id = n.user_id

@@ -11,10 +11,11 @@ import { sequelize } from '../index.js';
 
 export class Unit extends Model<InferAttributes<Unit>, InferCreationAttributes<Unit>> {
   declare id: CreationOptional<string>;
-  declare classId: string;
+  // Exactly one of the two is set: a class's own unit, or a group's (contract 4). Where it
+  // sits in each class is its ClassUnit.
+  declare classId: string | null;
+  declare groupId: string | null;
   declare title: string;
-  // Dense and 0-based among the units of one class; the service renumbers siblings.
-  declare position: number;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
 }
@@ -27,9 +28,9 @@ Unit.init(
       allowNull: false,
       defaultValue: Sequelize.literal('gen_random_uuid()'),
     },
-    classId: { type: DataTypes.UUID, allowNull: false },
+    classId: { type: DataTypes.UUID, allowNull: true },
+    groupId: { type: DataTypes.UUID, allowNull: true },
     title: { type: DataTypes.TEXT, allowNull: false },
-    position: { type: DataTypes.INTEGER, allowNull: false },
     createdAt: { type: DataTypes.DATE, allowNull: false },
     updatedAt: { type: DataTypes.DATE, allowNull: false },
   },

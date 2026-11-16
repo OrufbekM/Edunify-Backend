@@ -1,10 +1,11 @@
 import { QueryTypes, Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
-import { ClassStudent, Homework, Lesson, Submission } from '../../db/models/index.js';
+import { ClassStudent, Lesson, Submission } from '../../db/models/index.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
 import { getOwnClass } from '../classes/service.js';
-import { lessonDetail, type HomeworkDto } from '../lessons/service.js';
+import { findPlacement } from '../lessons/placements.js';
+import { homeworkOf, type HomeworkDto } from '../lessons/service.js';
 import { notify, removeUnreadGradeNotices } from '../notifications/service.js';
 import {
   lockSubmission,
@@ -38,24 +39,26 @@ function submissionNotFound(): AppError {
   return new AppError('NOT_FOUND', 'Submission not found');
 }
 
-// Every roster row, whatever its connection state, sorted like the roster, each with its latest
-// version built for a teacher, so with aiSuggestion (contract 8.9). One REPEATABLE READ
-// snapshot, so the homework, the roster and the submissions agree with each other.
-export async function getGrading(teacherId: string, lessonId: string): Promise<GradingDto> {
+// Every roster row of the class, whatever its connection state, sorted like the roster, each
+// with its latest version built for a teacher, so with aiSuggestion (contract 8.9). Hidden
+// lessons are graded too. One REPEATABLE READ snapshot, so the homework, the roster and the
+// submissions agree with each other.
+export async function getGrading(teacherId: string, classId: string, lessonId: string): Promise<GradingDto> {
   return sequelize.transaction(
     { isolationLevel: Transaction.ISOLATION_LEVELS.REPEATABLE_READ },
     async (transaction) => {
-      const lesson = await Lesson.findByPk(lessonId, { transaction });
+      await notFoundAs(getOwnClass(teacherId, classId, transaction), lessonNotFound);
+
+      const placement = await findPlacement(classId, lessonId, transaction);
+      const lesson = placement && (await Lesson.findByPk(lessonId, { transaction }));
 
       if (!lesson) {
         throw lessonNotFound();
       }
 
-      await notFoundAs(getOwnClass(teacherId, lesson.classId, transaction), lessonNotFound);
+      const homework = await homeworkOf(lesson, transaction);
 
-      const detail = await lessonDetail(lesson, transaction);
-
-      if (!detail.homework) {
+      if (!homework) {
         throw lessonNotFound();
       }
 
@@ -74,7 +77,7 @@ export async function getGrading(teacherId: string, lessonId: string): Promise<G
           WHERE cs.class_id = $classId
           ORDER BY lower(cs.full_name), cs.full_name, cs.id`,
         {
-          bind: { homeworkId: detail.homework.id, classId: lesson.classId },
+          bind: { homeworkId: homework.id, classId },
           type: QueryTypes.SELECT,
           transaction,
         },
@@ -87,7 +90,7 @@ export async function getGrading(teacherId: string, lessonId: string): Promise<G
 
       return {
         lesson: { id: lesson.id, title: lesson.title },
-        homework: detail.homework,
+        homework,
         items: rows.map((row) => ({
           classStudentId: row.classStudentId,
           fullName: row.fullName,
@@ -106,20 +109,20 @@ async function lockLatest(
   submissionId: string,
   transaction: Transaction,
 ): Promise<{ submission: Submission; row: ClassStudent }> {
+  // A submission belongs to its roster row's class (contract 4), whichever classes share
+  // the lesson.
   const found = await Submission.findByPk(submissionId, {
-    attributes: ['homeworkId'],
+    attributes: ['classStudentId'],
     transaction,
   });
-  const homework =
-    found && (await Homework.findByPk(found.homeworkId, { attributes: ['lessonId'], transaction }));
-  const lesson =
-    homework && (await Lesson.findByPk(homework.lessonId, { attributes: ['classId'], transaction }));
+  const owner =
+    found && (await ClassStudent.findByPk(found.classStudentId, { attributes: ['classId'], transaction }));
 
-  if (!lesson) {
+  if (!owner) {
     throw submissionNotFound();
   }
 
-  await notFoundAs(getOwnClass(teacherId, lesson.classId, transaction), submissionNotFound);
+  await notFoundAs(getOwnClass(teacherId, owner.classId, transaction), submissionNotFound);
 
   const locked = await lockSubmission(submissionId, transaction);
 

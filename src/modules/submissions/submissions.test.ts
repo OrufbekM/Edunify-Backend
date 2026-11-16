@@ -11,6 +11,7 @@ import { ClassStudent, FileRecord, Homework, Submission } from '../../db/models/
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { storage } from '../../storage/index.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { getFile, isStored, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 
@@ -47,12 +48,14 @@ async function linkActive(user: TestUser, fullName: string, forClass = schoolCla
 }
 
 async function addHomework(type: HomeworkType, title = 'Fractions', forClass = schoolClass.id, owner = teacher) {
-  const lessonId = (await api(owner).post(`/api/v1/classes/${forClass}/lessons`, { title })).body.id as string;
-  const lesson = await api(owner).put(`/api/v1/lessons/${lessonId}/homework`, { type });
+  const unitId = await firstUnitId(owner, forClass);
+  const lessonId = (await api(owner).post(`/api/v1/classes/${forClass}/lessons`, { title, unitId })).body.id as string;
+  const lesson = await api(owner).put(`/api/v1/lessons/${lessonId}/homework?classId=${forClass}`, { type });
   return { lessonId, homeworkId: lesson.body.homework.id as string };
 }
 
-const submissionsPath = (homeworkId: string) => `/api/v1/homeworks/${homeworkId}/submissions`;
+const submissionsPath = (homeworkId: string, classId = schoolClass.id) =>
+  `/api/v1/homeworks/${homeworkId}/submissions?classId=${classId}`;
 
 function submitPages(user: TestUser, homeworkId: string, pages: Array<[Buffer, string]>) {
   let pending = request(app).post(submissionsPath(homeworkId)).set('Authorization', `Bearer ${user.token}`);
@@ -62,8 +65,8 @@ function submitPages(user: TestUser, homeworkId: string, pages: Array<[Buffer, s
   return pending;
 }
 
-async function submitText(homeworkId: string, text = 'My answer', user = student) {
-  const res = await api(user).post(submissionsPath(homeworkId), { text });
+async function submitText(homeworkId: string, text = 'My answer', user = student, classId = schoolClass.id) {
+  const res = await api(user).post(submissionsPath(homeworkId, classId), { text });
   expect(res.status).toBe(201);
   return res.body;
 }
@@ -648,7 +651,7 @@ describe('GET /student/submissions', () => {
     const here = await addHomework('text', 'Here');
     const there = await addHomework('text', 'There', other.id);
     await submitText(here.homeworkId);
-    await submitText(there.homeworkId);
+    await submitText(there.homeworkId, 'My answer', student, other.id);
 
     const filtered = await api(student).get(`/api/v1/student/submissions?classId=${other.id}`);
     expect(filtered.body.items.map((item: { lesson: { title: string } }) => item.lesson.title)).toEqual(['There']);
@@ -686,7 +689,7 @@ describe('LessonDetail.mySubmission', () => {
     const latest = await submitText(homeworkId, 'two');
     await Submission.update({ aiSuggestion: AI_SUGGESTION }, { where: { id: latest.id } });
 
-    const res = await api(student).get(`/api/v1/lessons/${lessonId}`);
+    const res = await api(student).get(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`);
 
     expect(res.body.mySubmission).toMatchObject({ id: latest.id, version: 2, content: { type: 'text', text: 'two' } });
     expect(res.body.mySubmission).not.toHaveProperty('aiSuggestion');
@@ -695,7 +698,7 @@ describe('LessonDetail.mySubmission', () => {
   it('is null before the first submission, and absent for the teacher', async () => {
     const { lessonId } = await addHomework('text');
 
-    expect((await api(student).get(`/api/v1/lessons/${lessonId}`)).body.mySubmission).toBeNull();
-    expect((await api(teacher).get(`/api/v1/lessons/${lessonId}`)).body).not.toHaveProperty('mySubmission');
+    expect((await api(student).get(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`)).body.mySubmission).toBeNull();
+    expect((await api(teacher).get(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`)).body).not.toHaveProperty('mySubmission');
   });
 });

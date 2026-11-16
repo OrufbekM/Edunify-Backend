@@ -8,10 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../app.js';
 import { env } from '../../config/env.js';
 import { sequelize } from '../../db/index.js';
-import { AiJob, Lesson, Submission } from '../../db/models/index.js';
+import { AiJob, ClassLesson, Submission } from '../../db/models/index.js';
 import { startAiWorker } from '../../jobs/aiWorker.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { getFile, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 import { model, type ModelRequest, type ModelResponse } from './model.js';
@@ -91,9 +92,9 @@ async function addStudent(fullName: string): Promise<TestUser> {
 }
 
 async function addHomework(type: string, options: { instructionsText?: string; title?: string } = {}) {
-  const lesson = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: options.title ?? 'Equations' }))
+  const lesson = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: options.title ?? 'Equations', unitId: await firstUnitId(teacher, schoolClass.id) }))
     .body.id as string;
-  const res = await api(teacher).put(`/api/v1/lessons/${lesson}/homework`, {
+  const res = await api(teacher).put(`/api/v1/lessons/${lesson}/homework?classId=${schoolClass.id}`, {
     type,
     ...(options.instructionsText ? { instructionsText: options.instructionsText } : {}),
   });
@@ -101,7 +102,7 @@ async function addHomework(type: string, options: { instructionsText?: string; t
 }
 
 async function submitText(text: string, user = student, forHomework = homeworkId): Promise<string> {
-  const res = await api(user).post(`/api/v1/homeworks/${forHomework}/submissions`, { text });
+  const res = await api(user).post(`/api/v1/homeworks/${forHomework}/submissions?classId=${schoolClass.id}`, { text });
   expect(res.status).toBe(201);
   return res.body.id as string;
 }
@@ -110,7 +111,7 @@ async function grade(submissionId: string, body: object = { value: 5 }): Promise
   expect((await api(teacher).put(`/api/v1/submissions/${submissionId}/grade`, body)).status).toBe(200);
 }
 
-const aiGradePath = (forLesson = lessonId) => `/api/v1/lessons/${forLesson}/ai-grade`;
+const aiGradePath = (forLesson = lessonId) => `/api/v1/lessons/${forLesson}/ai-grade?classId=${schoolClass.id}`;
 
 function startJob(body?: object, forLesson = lessonId, user = teacher) {
   const pending = request(app).post(aiGradePath(forLesson)).set('Authorization', `Bearer ${user.token}`);
@@ -200,6 +201,7 @@ describe('POST /lessons/:lessonId/ai-grade', () => {
     expect(res.body).toEqual({
       id: expect.any(String),
       lessonId,
+      classId: schoolClass.id,
       status: 'queued',
       total: 2,
       completed: 0,
@@ -255,7 +257,7 @@ describe('POST /lessons/:lessonId/ai-grade', () => {
   });
 
   it('gives VALIDATION_ERROR when there is nothing to grade', async () => {
-    const bare = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Bare' })).body.id;
+    const bare = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Bare', unitId: await firstUnitId(teacher, schoolClass.id) })).body.id;
 
     for (const forLesson of [lessonId, bare]) {
       const res = await startJob(undefined, forLesson);
@@ -302,10 +304,24 @@ describe('POST /lessons/:lessonId/ai-grade', () => {
     const submissionId = await submitText('answer');
     let heldJob = '';
     const other = await holdOpen(async (t) => {
-      await Lesson.findByPk(lessonId, { lock: Transaction.LOCK.NO_KEY_UPDATE, transaction: t });
+      // The lock a job start takes: the lesson's place in this class.
+      await ClassLesson.findOne({
+        where: { classId: schoolClass.id, lessonId },
+        lock: Transaction.LOCK.NO_KEY_UPDATE,
+        transaction: t,
+      });
       heldJob = (
         await AiJob.create(
-          { lessonId, createdBy: teacher.id, status: 'queued', submissionIds: [submissionId], total: 1, error: null, finishedAt: null },
+          {
+            lessonId,
+            classId: schoolClass.id,
+            createdBy: teacher.id,
+            status: 'queued',
+            submissionIds: [submissionId],
+            total: 1,
+            error: null,
+            finishedAt: null,
+          },
           { transaction: t },
         )
       ).id;
@@ -415,8 +431,8 @@ describe('the worker', () => {
   });
 
   it('sends the lesson material, the instructions and the answer, with no sampling settings', async () => {
-    await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file`, Buffer.from('# Linear equations\nMove terms.'), 'lesson.md');
-    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file`, Buffer.from('Also check your answer.'), 'task.md');
+    await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file?classId=${schoolClass.id}`, Buffer.from('# Linear equations\nMove terms.'), 'lesson.md');
+    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file?classId=${schoolClass.id}`, Buffer.from('Also check your answer.'), 'task.md');
     await submitText('x = 3');
     const send = stubModel(() => reply({ value: 5, comment: 'Good' }));
     await startJob();
@@ -452,8 +468,8 @@ describe('the worker', () => {
   });
 
   it('never sends a PDF', async () => {
-    await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file`, PDF, 'lesson.pdf');
-    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file`, PDF, 'task.pdf');
+    await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file?classId=${schoolClass.id}`, PDF, 'lesson.pdf');
+    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file?classId=${schoolClass.id}`, PDF, 'task.pdf');
     await submitText('x = 3');
     const send = stubModel(() => reply({ value: 5, comment: 'Good' }));
     await startJob();
@@ -468,7 +484,7 @@ describe('the worker', () => {
 
   it('sends code in its three parts', async () => {
     const code = await addHomework('code', { title: 'Page' });
-    await api(student).post(`/api/v1/homeworks/${code.homeworkId}/submissions`, { html: '<p>Hi</p>', css: '', js: 'go()' });
+    await api(student).post(`/api/v1/homeworks/${code.homeworkId}/submissions?classId=${schoolClass.id}`, { html: '<p>Hi</p>', css: '', js: 'go()' });
     const send = stubModel(() => reply({ value: 3, comment: 'Add CSS' }));
     await startJob(undefined, code.lessonId);
 
@@ -482,7 +498,7 @@ describe('the worker', () => {
   it('sends pages as base64 images, in order, with their own types', async () => {
     const photo = await addHomework('photo', { title: 'Photo' });
     await request(app)
-      .post(`/api/v1/homeworks/${photo.homeworkId}/submissions`)
+      .post(`/api/v1/homeworks/${photo.homeworkId}/submissions?classId=${schoolClass.id}`)
       .set('Authorization', `Bearer ${student.token}`)
       .attach('pages', JPEG, 'one.jpg')
       .attach('pages', WEBP, 'two.webp')
@@ -505,7 +521,7 @@ describe('the worker', () => {
     const wide = await blank(3000, 100).png().toBuffer();
     const photo = await addHomework('photo', { title: 'Wide' });
     const submitted = await request(app)
-      .post(`/api/v1/homeworks/${photo.homeworkId}/submissions`)
+      .post(`/api/v1/homeworks/${photo.homeworkId}/submissions?classId=${schoolClass.id}`)
       .set('Authorization', `Bearer ${student.token}`)
       .attach('pages', wide, 'wide.png');
     const send = stubModel(() => reply({ value: 4, comment: 'Neat' }));
@@ -583,7 +599,7 @@ describe('the worker', () => {
     await submitText('answer');
     const send = stubModel(() => reply({ value: 5, comment: 'Good' }));
     const { id } = (await startJob()).body;
-    await api(teacher).delete(`/api/v1/lessons/${lessonId}/homework`);
+    await api(teacher).delete(`/api/v1/lessons/${lessonId}/homework?classId=${schoolClass.id}`);
 
     await runNextJob();
 
@@ -691,7 +707,7 @@ describe('the worker', () => {
     stubModel(async () => {
       calls += 1;
       deletion ??= api(teacher)
-        .delete(`/api/v1/lessons/${lessonId}`)
+        .delete(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`)
         .then((res) => expect(res.status).toBe(204));
       await deletion;
       return reply({ value: 4, comment: 'Ok' });
@@ -830,7 +846,7 @@ describe('choosing the AI by homework type', () => {
   }
 
   async function submitPhoto(forHomework: string, pages: Array<[Buffer, string]>): Promise<string> {
-    let pending = request(app).post(`/api/v1/homeworks/${forHomework}/submissions`).set('Authorization', `Bearer ${student.token}`);
+    let pending = request(app).post(`/api/v1/homeworks/${forHomework}/submissions?classId=${schoolClass.id}`).set('Authorization', `Bearer ${student.token}`);
     for (const [content, name] of pages) {
       pending = pending.attach('pages', content, name);
     }

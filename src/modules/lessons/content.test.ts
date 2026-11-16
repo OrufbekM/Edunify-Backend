@@ -9,6 +9,7 @@ import { FileRecord, Homework, Submission } from '../../db/models/index.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { storage } from '../../storage/index.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { addSubmission, getFile, isStored, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 
@@ -37,12 +38,14 @@ beforeEach(async () => {
   const category = await api(teacher).post('/api/v1/categories', { name: 'Maths' });
   const created = await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths' });
   schoolClass = created.body;
-  lessonId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Fractions' })).body.id;
+  const unitId = await firstUnitId(teacher, schoolClass.id);
+  lessonId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Fractions', unitId })).body.id;
 });
 
-const lessonFilePath = (id = lessonId) => `/api/v1/lessons/${id}/lesson-file`;
-const homeworkPath = (id = lessonId) => `/api/v1/lessons/${id}/homework`;
-const homeworkFilePath = (id = lessonId) => `/api/v1/lessons/${id}/homework/file`;
+const lessonFilePath = (id = lessonId, classId = schoolClass.id) => `/api/v1/lessons/${id}/lesson-file?classId=${classId}`;
+const homeworkPath = (id = lessonId, classId = schoolClass.id) => `/api/v1/lessons/${id}/homework?classId=${classId}`;
+const homeworkFilePath = (id = lessonId, classId = schoolClass.id) =>
+  `/api/v1/lessons/${id}/homework/file?classId=${classId}`;
 
 function expectError(res: request.Response, status: number, code: string): void {
   expect(res.status).toBe(status);
@@ -92,11 +95,14 @@ describe('PUT /lessons/:id/lesson-file', () => {
     expect(res.body).toEqual({
       id: lessonId,
       classId: schoolClass.id,
-      unitId: null,
+      unitId: await firstUnitId(teacher, schoolClass.id),
+      number: 1,
       title: 'Fractions',
       order: 0,
       lessonFile: fileRefFor(res.body.lessonFile.id, 'kasrlar.md', 'text/markdown', MD.length),
       homework: null,
+      linked: false,
+      visible: true,
     });
     await expect(FileRecord.findByPk(res.body.lessonFile.id)).resolves.toMatchObject({
       ownerUserId: teacher.id,
@@ -388,7 +394,7 @@ describe('GET /lessons/:id with files', () => {
     await putHomework({ type: 'text', instructionsText: 'Read' });
     await api(teacher).upload(homeworkFilePath(), PDF, 'task.pdf');
 
-    const res = await api(student).get(`/api/v1/lessons/${lessonId}`);
+    const res = await api(student).get(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({

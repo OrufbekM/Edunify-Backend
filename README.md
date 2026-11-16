@@ -146,6 +146,7 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | `EMAIL_TAKEN` | 409 | The email is already registered |
 | `CATEGORY_NAME_TAKEN` | 409 | You already have a category with this name (case doesn't matter) |
 | `CATEGORY_NOT_EMPTY` | 409 | The category still has classes |
+| `LAST_UNIT` | 409 | A class must keep at least one unit; `details.classIds` names the class |
 | `INVALID_STATUS_TRANSITION` | 409 | That account status change isn't allowed (see the admin endpoints) |
 | `STUDENT_ID_IN_USE` | 409 | That student already has a row in this class |
 | `HOMEWORK_TYPE_LOCKED` | 409 | The homework type can't change once there are submissions |
@@ -271,14 +272,18 @@ interface ClassStudent {
   connectionState: ConnectionState // not_connected, awaiting_student (no claim yet), connected
 }
 
-interface Unit { id: string; classId: string; title: string; order: number }
+interface Unit { id: string; classId: string; title: string; order: number }   // order: 0-based in the class
 
 interface LessonSummary {
   id: string
-  unitId: string | null
+  unitId: string                       // every lesson is in a unit
+  number: number                       // 1, 2, 3... across units in outline order; computed, never stored
   title: string
-  order: number
+  order: number                        // 0-based within its unit in this class
   homeworkType: HomeworkType | null    // null = no homework
+  linked?: boolean                     // teachers only; always false until class groups (plan Phase 17)
+  visible?: boolean                    // teachers only; students only ever get visible lessons
+  newSubmissionCount?: number          // teachers only; always 0 for now (plan Phase 16)
 }
 
 interface Homework {
@@ -291,14 +296,19 @@ interface Homework {
 
 interface LessonDetail {
   id: string
-  classId: string
-  unitId: string | null
+  classId: string                      // the class it was asked for in
+  unitId: string
+  number: number
   title: string
   order: number
   lessonFile: FileRef | null
   homework: Homework | null
+  linked?: boolean                     // teachers only
+  visible?: boolean                    // teachers only
   mySubmission?: Submission | null     // students only: their latest version
 }
+
+interface ContentImpact { classes: { id: string; name: string; submissionCount: number }[] }
 
 type SubmissionContent =
   | { type: 'text'; text: string }
@@ -344,6 +354,7 @@ interface JournalCell { lessonId: string; status: CellStatus; value: Grade | nul
 interface AiJob {
   id: string
   lessonId: string
+  classId: string
   status: JobStatus
   total: number
   completed: number            // suggestions made
@@ -425,22 +436,27 @@ Each row is one student in the class, with the name the teacher knows them by. A
 
 ### Outline, units and lessons
 
-A class's lessons can be grouped into units. Lessons without a unit come first. `order` is the 0-based position among siblings; the server keeps positions continuous when you add, move or delete.
+Every lesson sits in a unit, and a class always keeps at least one unit (a new class starts with `Unit 1`). `order` is the 0-based position among siblings; the server keeps positions continuous when you add, move or delete. Each lesson also has a `number`, 1, 2, 3... running across units in outline order. Numbers are computed on every read, so any change renumbers the lessons after it; you never send one.
+
+A teacher can hide a lesson from students (`visible: false`, per class). Hidden lessons keep their number, so students can see gaps (1, 2, 4). A student never gets a hidden lesson, or a unit with nothing visible in it.
+
+**`?classId=` is required** on every route below that names a unit, lesson or homework by id, and on grading, AI grading and handing in. It says which class the request is about. A class you don't own or aren't connected to, an item that class doesn't hold, or (for students) a hidden lesson all answer `404 NOT_FOUND`.
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `GET /classes/:classId/outline` | T, S | The class's structure: `200 { units: Unit[], lessons: LessonSummary[] }`. Units in order; lessons without a unit first, then each unit's lessons in order. |
+| `GET /classes/:classId/outline` | T, S | The class's structure: `200 { units: Unit[], lessons: LessonSummary[] }`. Units in order; lessons in outline order (unit order, then lesson order), each with its `number`. |
 | `POST /classes/:classId/units` | T | Body `{ title }`. Adds it at the end. `201 Unit`. Error: `LIMIT_REACHED`. |
-| `PATCH /units/:id` | T | Body `{ title?, order? }`; `order` moves it to that position. `200 Unit`. An `order` out of range is a `VALIDATION_ERROR`. |
-| `DELETE /units/:id` | T | Deletes the unit and its lessons. `204` |
-| `POST /classes/:classId/lessons` | T | Body `{ title, unitId? }`. Adds it at the end of its group. `201 LessonDetail`. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a unit of another class. |
-| `GET /lessons/:id` | T, S | `200 LessonDetail`. Students also get `mySubmission`: their latest version, or `null`. |
-| `PATCH /lessons/:id` | T | Body `{ title?, unitId?, order? }`; `unitId: null` moves it out of its unit. `200 LessonDetail` |
-| `DELETE /lessons/:id` | T | Deletes the lesson with its homework and submissions. `204` |
+| `PATCH /units/:id?classId=` | T | Body `{ title?, order? }`; `order` moves it to that position. `200 Unit`. An `order` out of range is a `VALIDATION_ERROR`. |
+| `DELETE /units/:id?classId=` | T | Deletes the unit with its lessons, their homework and submissions. `204`. Error: `LAST_UNIT` for the class's only unit. |
+| `POST /classes/:classId/lessons` | T | Body `{ title, unitId, linked? }`. Adds it visible, at the end of its unit. `201 LessonDetail`. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a unit of another class or `linked: true` (class groups come later). |
+| `GET /lessons/:id?classId=` | T, S | `200 LessonDetail`. Students also get `mySubmission`: their latest version, or `null`. |
+| `PATCH /lessons/:id?classId=` | T | Body `{ title?, unitId?, order?, visible?, linked? }`. `order` is the position in the unit the lesson ends up in (the new one when `unitId` changes); moving to another unit without `order` puts it last there. Send both on every drag and drop. `visible` hides or shows it in this class. `200 LessonDetail` |
+| `DELETE /lessons/:id?classId=&scope=` | T | `scope` is `class` (the default): deletes the lesson with its homework and submissions. `scope=all` is only for linked lessons (later). `204` |
+| `GET /lessons/:id/impact?classId=` | T | Which classes hold the lesson and how many of their students handed it in: `200 ContentImpact`. Show it before a delete. |
 
 ### Lesson file and homework (teachers)
 
-Each lesson can have one file to read and one piece of homework. Uploads are `multipart/form-data` with the file in the field `file`.
+Each lesson can have one file to read and one piece of homework. Uploads are `multipart/form-data` with the file in the field `file`. Every path here takes `?classId=`.
 
 | Endpoint | What it does |
 |---|---|
@@ -457,7 +473,7 @@ Each hand-in is a new version; earlier versions and their grades stay.
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `POST /homeworks/:homeworkId/submissions` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Returns `201 Submission` with the next version number, and notifies the teacher. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` when you aren't connected to the class. |
+| `POST /homeworks/:homeworkId/submissions?classId=` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Returns `201 Submission` with the next version number, and notifies the teacher. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` when you aren't connected to the class or the lesson is hidden. |
 | `GET /student/submissions?classId=` | S | Your latest version of each homework, newest first; `classId` is an optional filter. `200 { items: [{ submission, lesson: { id, title }, class: { id, name } }] }` |
 | `GET /submissions/:id` | T, S | One version, with the list of all versions of that homework by that student, newest first. `200 Submission & { versions: SubmissionVersion[] }` |
 
@@ -465,17 +481,17 @@ Each hand-in is a new version; earlier versions and their grades stay.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /lessons/:lessonId/grading` | Everything to grade one lesson: `200 { lesson: { id, title }, homework: Homework, items: [{ classStudentId, fullName, submission }] }`. One item per roster row, sorted by name; `submission` is that student's latest version, with any AI suggestion, or `null`. `404` if the lesson has no homework. |
+| `GET /lessons/:lessonId/grading?classId=` | Everything to grade one lesson in one class: `200 { lesson: { id, title }, homework: Homework, items: [{ classStudentId, fullName, submission }] }`. One item per roster row of that class, sorted by name; hidden lessons can be graded too; `submission` is that student's latest version, with any AI suggestion, or `null`. `404` if the lesson has no homework. |
 | `PUT /submissions/:id/grade` | Grades the latest version: `{ value: 2-5, comment?, fromAi? }`, or sends it back: `{ denied: true, comment }`. A second call replaces the grade. `fromAi: true` confirms the AI suggestion (you may change its value or comment) and marks the grade `ai_confirmed`. Returns `200 Submission` and notifies the student. Errors: `SUBMISSION_NOT_LATEST`, and `VALIDATION_ERROR` for both or neither of `value` and `denied`, a denial without a comment, or `fromAi` with no suggestion. |
 | `DELETE /submissions/:id/grade` | Removes the grade: the submission goes back to `submitted`, and the student's unread notification for it disappears. `200 Submission`. Error: `SUBMISSION_NOT_LATEST`. |
 
 ### Journal and grades
 
-Both show only lessons that have homework, as columns in outline order, with one cell per lesson from the latest version. `average` is the mean of the graded cells, to 2 decimal places; denied and empty cells don't count, and it is `null` when nothing is graded.
+Both show only lessons that have homework, as columns in outline order with their `number`, and one cell per lesson from the latest version. The teacher's journal includes hidden lessons; a student's grades leave them out. `average` is the mean of the graded cells, to 2 decimal places; denied and empty cells don't count, and it is `null` when nothing is graded.
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `GET /classes/:classId/journal` | T | The whole class: `200 { units: Unit[], columns: [{ lessonId, title, unitId }], rows: [{ classStudentId, fullName, connectionState, cells: JournalCell[], average }] }`. Rows are sorted by name; `cells` line up with `columns`. |
+| `GET /classes/:classId/journal` | T | The whole class: `200 { units: Unit[], columns: [{ lessonId, number, title, unitId }], rows: [{ classStudentId, fullName, connectionState, cells: JournalCell[], average }] }`. Rows are sorted by name; `cells` line up with `columns`. |
 | `GET /student/grades` | S | Your own grades, one item per class: `200 { items: [{ class: { id, name }, columns, cells, average }] }`, sorted by class name |
 
 ### AI grading (teachers)
@@ -488,7 +504,7 @@ Which AI grades depends on the homework type and the server's settings: typed an
 
 | Endpoint | What it does |
 |---|---|
-| `POST /lessons/:lessonId/ai-grade` | Starts a job. Body `{ submissionIds? }`: leave it out for every latest submission still waiting for a grade, or list specific ones (`[id]` for one student). Returns `202 AiJob`. Errors: `AI_JOB_ACTIVE` (with `details.jobId` of the running job), `VALIDATION_ERROR` (ids that aren't latest versions in this lesson, or nothing to grade), `AI_UNAVAILABLE`, `RATE_LIMITED` (5 a minute). |
+| `POST /lessons/:lessonId/ai-grade?classId=` | Starts a job for that class's students. Body `{ submissionIds? }`: leave it out for every latest submission still waiting for a grade, or list specific ones (`[id]` for one student). Returns `202 AiJob`. Errors: `AI_JOB_ACTIVE` (one job per lesson and class; `details.jobId` names it), `VALIDATION_ERROR` (ids that aren't latest versions in this lesson, or nothing to grade), `AI_UNAVAILABLE`, `RATE_LIMITED` (5 a minute). |
 | `GET /ai-jobs/:id` | The job's progress: `200 AiJob`. Poll it every 2 seconds while `status` is `queued` or `running`; when it turns `done` or `failed`, reload the grading page. `done` means every submission was processed, some perhaps in `failed`; `failed` means the job itself couldn't run, with the reason in `error`. |
 
 ### Notifications (any signed-in user)
@@ -554,17 +570,19 @@ curl -s -X POST $API/classes/$CLASS_ID/students -H "Authorization: Bearer $T" -H
 # The student enters the class ID: now they are connected.
 curl -s -X POST $API/student/claims -H "Authorization: Bearer $S" -H "$JSON" -d "{\"classPublicId\":\"$CLASS_PUBLIC_ID\"}"
 
-# The teacher adds a lesson with text homework.
-LESSON=$(curl -s -X POST $API/classes/$CLASS_ID/lessons -H "Authorization: Bearer $T" -H "$JSON" -d '{"title":"Equations"}' | jq -r .id)
-HOMEWORK=$(curl -s -X PUT $API/lessons/$LESSON/homework -H "Authorization: Bearer $T" -H "$JSON" \
+# The teacher adds a lesson with text homework, in the class's first unit.
+UNIT=$(curl -s $API/classes/$CLASS_ID/outline -H "Authorization: Bearer $T" | jq -r '.units[0].id')
+LESSON=$(curl -s -X POST $API/classes/$CLASS_ID/lessons -H "Authorization: Bearer $T" -H "$JSON" \
+  -d "{\"title\":\"Equations\",\"unitId\":\"$UNIT\"}" | jq -r .id)
+HOMEWORK=$(curl -s -X PUT "$API/lessons/$LESSON/homework?classId=$CLASS_ID" -H "Authorization: Bearer $T" -H "$JSON" \
   -d '{"type":"text","instructionsText":"Solve x + 2 = 5"}' | jq -r .homework.id)
 
 # The student hands it in. (For draw or photo homework: -F pages=@page1.png -F pages=@page2.png)
-SUBMISSION=$(curl -s -X POST $API/homeworks/$HOMEWORK/submissions -H "Authorization: Bearer $S" -H "$JSON" \
+SUBMISSION=$(curl -s -X POST "$API/homeworks/$HOMEWORK/submissions?classId=$CLASS_ID" -H "Authorization: Bearer $S" -H "$JSON" \
   -d '{"text":"x = 3"}' | jq -r .id)
 
 # The teacher sees it on the grading page and grades it; the student gets a notification.
-curl -s $API/lessons/$LESSON/grading -H "Authorization: Bearer $T"
+curl -s "$API/lessons/$LESSON/grading?classId=$CLASS_ID" -H "Authorization: Bearer $T"
 curl -s -X PUT $API/submissions/$SUBMISSION/grade -H "Authorization: Bearer $T" -H "$JSON" -d '{"value":5,"comment":"Well done"}'
 curl -s $API/notifications -H "Authorization: Bearer $S"
 curl -s $API/student/grades -H "Authorization: Bearer $S"

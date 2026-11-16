@@ -6,7 +6,8 @@ import { z } from 'zod';
 
 import { sequelize } from '../../db/index.js';
 import type { HomeworkType, JobStatus, SubmissionStatus } from '../../db/models/enums.js';
-import { AiJob, FileRecord, Homework, Lesson } from '../../db/models/index.js';
+import { AiJob, FileRecord, Homework } from '../../db/models/index.js';
+import { findPlacement } from '../lessons/placements.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import { storage } from '../../storage/index.js';
@@ -22,6 +23,7 @@ const PARALLEL = 3;
 export interface AiJobDto {
   id: string;
   lessonId: string;
+  classId: string;
   status: JobStatus;
   total: number;
   completed: number;
@@ -35,6 +37,7 @@ function toJobDto(job: AiJob): AiJobDto {
   return {
     id: job.id,
     lessonId: job.lessonId,
+    classId: job.classId,
     status: job.status,
     total: job.total,
     completed: job.completed,
@@ -61,21 +64,25 @@ export function onJobQueued(listener: () => void): () => void {
   return () => jobEvents.off('queued', listener);
 }
 
-// Latest versions only: grading, and so a suggestion, is for the latest version alone.
+// Latest versions only: grading, and so a suggestion, is for the latest version alone. Only
+// this class's students: classes that share a lesson grade apart (contract 8.11).
 async function latestSubmissions(
   lessonId: string,
+  classId: string,
   transaction: Transaction,
 ): Promise<Array<{ id: string; status: SubmissionStatus }>> {
   return sequelize.query(
     `SELECT s.id, s.status
        FROM submissions s
        JOIN homeworks h ON h.id = s.homework_id
+       JOIN class_students cs ON cs.id = s.class_student_id
       WHERE h.lesson_id = $lessonId
+        AND cs.class_id = $classId
         AND s.version = (SELECT max(v.version) FROM submissions v
                           WHERE v.homework_id = s.homework_id
                             AND v.class_student_id = s.class_student_id)
       ORDER BY s.created_at, s.id`,
-    { bind: { lessonId }, type: QueryTypes.SELECT, transaction },
+    { bind: { lessonId, classId }, type: QueryTypes.SELECT, transaction },
   );
 }
 
@@ -106,6 +113,7 @@ function pickSubmissions(
 
 export async function startAiGrading(
   teacherId: string,
+  classId: string,
   lessonId: string,
   input: { submissionIds?: string[] },
 ): Promise<AiJobDto> {
@@ -115,23 +123,13 @@ export async function startAiGrading(
   }
 
   const job = await sequelize.transaction(async (transaction) => {
-    const found = await Lesson.findByPk(lessonId, { attributes: ['classId'], transaction });
+    await notFoundAs(getOwnClass(teacherId, classId, transaction), lessonNotFound);
 
-    if (!found) {
-      throw lessonNotFound();
-    }
+    // The check for an active job and the insert happen under this lock on the lesson's place
+    // in the class, so a double click can't start two jobs (plan, Phase 10).
+    const placement = await findPlacement(classId, lessonId, transaction, { lock: true });
 
-    await notFoundAs(getOwnClass(teacherId, found.classId, transaction), lessonNotFound);
-
-    // The check for an active job and the insert happen under this lock, so a double click
-    // can't start two jobs (plan, Phase 10).
-    const lesson = await Lesson.findByPk(lessonId, {
-      attributes: ['id'],
-      lock: Transaction.LOCK.NO_KEY_UPDATE,
-      transaction,
-    });
-
-    if (!lesson) {
+    if (!placement) {
       throw lessonNotFound();
     }
 
@@ -144,7 +142,7 @@ export async function startAiGrading(
 
     const active = await AiJob.findOne({
       attributes: ['id'],
-      where: { lessonId, status: ['queued', 'running'] },
+      where: { lessonId, classId, status: ['queued', 'running'] },
       transaction,
     });
 
@@ -154,7 +152,7 @@ export async function startAiGrading(
 
     const submissionIds = pickSubmissions(
       input.submissionIds,
-      await latestSubmissions(lessonId, transaction),
+      await latestSubmissions(lessonId, classId, transaction),
     );
 
     if (submissionIds.length === 0) {
@@ -164,6 +162,7 @@ export async function startAiGrading(
     return AiJob.create(
       {
         lessonId,
+        classId,
         createdBy: teacherId,
         status: 'queued',
         submissionIds,
@@ -182,13 +181,12 @@ export async function startAiGrading(
 // The teacher of the lesson's class only (contract 8.11).
 export async function getAiJob(teacherId: string, jobId: string): Promise<AiJobDto> {
   const job = await AiJob.findByPk(jobId);
-  const lesson = job && (await Lesson.findByPk(job.lessonId, { attributes: ['classId'] }));
 
-  if (!job || !lesson) {
+  if (!job) {
     throw jobNotFound();
   }
 
-  await notFoundAs(getOwnClass(teacherId, lesson.classId), jobNotFound);
+  await notFoundAs(getOwnClass(teacherId, job.classId), jobNotFound);
   return toJobDto(job);
 }
 

@@ -1,6 +1,6 @@
-import { Router, type RequestHandler } from 'express';
+import { Router, type Request, type RequestHandler } from 'express';
 
-import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
+import { classQuerySchema, emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
@@ -9,6 +9,7 @@ import {
   classParams,
   createLessonBody,
   createUnitBody,
+  deleteLessonQuery,
   putHomeworkBody,
   updateLessonBody,
   updateUnitBody,
@@ -24,15 +25,23 @@ export const lessonsRouter = Router();
 const teacherOrStudent = requireRole('teacher', 'student');
 const teacherOnly = requireRole('teacher');
 
+// The item in the path and the class in ?classId= (contract 8.6).
+function target(req: Request): { id: string; classId: string } {
+  const { id } = idParamsSchema.parse(req.params);
+  const { classId } = classQuerySchema.parse(req.query);
+
+  return { id, classId };
+}
+
 // Runs before multer, so nobody can make the server buffer up to 20 MB for a lesson they
 // don't own (plan, Phase 7). The service checks again inside its transaction.
 function checkBeforeUpload(
-  check: (teacherId: string, lessonId: string) => Promise<void>,
+  check: (teacherId: string, classId: string, lessonId: string) => Promise<void>,
 ): RequestHandler {
   return async (req, _res, next) => {
-    const { id } = idParamsSchema.parse(req.params);
+    const { id, classId } = target(req);
 
-    await check(getAuth(req).id, id);
+    await check(getAuth(req).id, classId, id);
     next();
   };
 }
@@ -55,16 +64,16 @@ lessonsRouter.post('/classes/:classId/units', requireAuth, generalLimiter, teach
 });
 
 lessonsRouter.patch('/units/:id', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
   const body = updateUnitBody.parse(req.body);
 
-  res.json(await lessons.updateUnit(getAuth(req).id, id, body));
+  res.json(await lessons.updateUnit(getAuth(req).id, classId, id, body));
 });
 
 lessonsRouter.delete('/units/:id', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
 
-  await lessons.deleteUnit(getAuth(req).id, id);
+  await lessons.deleteUnit(getAuth(req).id, classId, id);
   res.status(204).end();
 });
 
@@ -76,24 +85,30 @@ lessonsRouter.post('/classes/:classId/lessons', requireAuth, generalLimiter, tea
 });
 
 lessonsRouter.get('/lessons/:id', requireAuth, generalLimiter, teacherOrStudent, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
-  emptyQuerySchema.parse(req.query);
+  const { id, classId } = target(req);
 
-  res.json(await lessons.getLesson(getAuth(req), id));
+  res.json(await lessons.getLesson(getAuth(req), classId, id));
 });
 
 lessonsRouter.patch('/lessons/:id', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
   const body = updateLessonBody.parse(req.body);
 
-  res.json(await lessons.updateLesson(getAuth(req).id, id, body));
+  res.json(await lessons.updateLesson(getAuth(req).id, classId, id, body));
 });
 
 lessonsRouter.delete('/lessons/:id', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
   const { id } = idParamsSchema.parse(req.params);
+  const { classId, scope } = deleteLessonQuery.parse(req.query);
 
-  await lessons.deleteLesson(getAuth(req).id, id);
+  await lessons.deleteLesson(getAuth(req).id, classId, id, scope);
   res.status(204).end();
+});
+
+lessonsRouter.get('/lessons/:id/impact', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
+  const { id, classId } = target(req);
+
+  res.json(await lessons.getLessonImpact(getAuth(req).id, classId, id));
 });
 
 lessonsRouter.put(
@@ -104,29 +119,29 @@ lessonsRouter.put(
   ownLessonFirst,
   uploadLessonFile,
   async (req, res) => {
-    const { id } = idParamsSchema.parse(req.params);
+    const { id, classId } = target(req);
 
-    res.json(await lessons.setLessonFile(getAuth(req).id, id, getUpload(req)));
+    res.json(await lessons.setLessonFile(getAuth(req).id, classId, id, getUpload(req)));
   },
 );
 
 lessonsRouter.delete('/lessons/:id/lesson-file', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
 
-  res.json(await lessons.removeLessonFile(getAuth(req).id, id));
+  res.json(await lessons.removeLessonFile(getAuth(req).id, classId, id));
 });
 
 lessonsRouter.put('/lessons/:id/homework', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
   const body = putHomeworkBody.parse(req.body);
 
-  res.json(await lessons.putHomework(getAuth(req).id, id, body));
+  res.json(await lessons.putHomework(getAuth(req).id, classId, id, body));
 });
 
 lessonsRouter.delete('/lessons/:id/homework', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
-  const { id } = idParamsSchema.parse(req.params);
+  const { id, classId } = target(req);
 
-  res.json(await lessons.deleteHomework(getAuth(req).id, id));
+  res.json(await lessons.deleteHomework(getAuth(req).id, classId, id));
 });
 
 lessonsRouter.put(
@@ -137,20 +152,14 @@ lessonsRouter.put(
   ownHomeworkFirst,
   uploadLessonFile,
   async (req, res) => {
-    const { id } = idParamsSchema.parse(req.params);
+    const { id, classId } = target(req);
 
-    res.json(await lessons.setHomeworkFile(getAuth(req).id, id, getUpload(req)));
+    res.json(await lessons.setHomeworkFile(getAuth(req).id, classId, id, getUpload(req)));
   },
 );
 
-lessonsRouter.delete(
-  '/lessons/:id/homework/file',
-  requireAuth,
-  generalLimiter,
-  teacherOnly,
-  async (req, res) => {
-    const { id } = idParamsSchema.parse(req.params);
+lessonsRouter.delete('/lessons/:id/homework/file', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
+  const { id, classId } = target(req);
 
-    res.json(await lessons.removeHomeworkFile(getAuth(req).id, id));
-  },
-);
+  res.json(await lessons.removeHomeworkFile(getAuth(req).id, classId, id));
+});

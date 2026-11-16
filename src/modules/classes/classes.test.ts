@@ -4,7 +4,9 @@ import type request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  ClassLesson,
   ClassStudent,
+  ClassUnit,
   Homework,
   Lesson,
   SchoolClass,
@@ -417,19 +419,8 @@ describe('DELETE /classes/:id', () => {
   it('deletes the class and everything in it, keeping the category', async () => {
     const { id } = await createClass(teacher, categoryId);
     const [unit] = await Unit.findAll({ where: { classId: id } });
-    const lesson = await Lesson.create({
-      classId: id,
-      unitId: unit?.id ?? null,
-      title: 'Lesson 1',
-      position: 0,
-      lessonFileId: null,
-    });
-    await Homework.create({
-      lessonId: lesson.id,
-      type: 'text',
-      instructionsText: null,
-      instructionsFileId: null,
-    });
+    const lesson = await api(teacher).post(`/api/v1/classes/${id}/lessons`, { title: 'Lesson 1', unitId: unit?.id });
+    await api(teacher).put(`/api/v1/lessons/${lesson.body.id}/homework?classId=${id}`, { type: 'text' });
     await ClassStudent.create({ classId: id, fullName: 'Ann', studentUserId: null });
 
     const res = await api(teacher).delete(`/api/v1/classes/${id}`);
@@ -440,11 +431,13 @@ describe('DELETE /classes/:id', () => {
       Promise.all([
         SchoolClass.count(),
         Unit.count(),
+        ClassUnit.count(),
         Lesson.count(),
+        ClassLesson.count(),
         Homework.count(),
         ClassStudent.count(),
       ]),
-    ).resolves.toEqual([0, 0, 0, 0, 0]);
+    ).resolves.toEqual([0, 0, 0, 0, 0, 0, 0]);
     expect((await api(teacher).get('/api/v1/categories')).body.items).toHaveLength(1);
   });
 

@@ -1,7 +1,10 @@
 import { AiJob } from './AiJob.js';
 import { Category } from './Category.js';
 import { ClassClaim } from './ClassClaim.js';
+import { ClassGroup } from './ClassGroup.js';
+import { ClassLesson } from './ClassLesson.js';
 import { ClassStudent } from './ClassStudent.js';
+import { ClassUnit } from './ClassUnit.js';
 import { ConnectionAudit } from './ConnectionAudit.js';
 import { FileRecord } from './FileRecord.js';
 import { Homework } from './Homework.js';
@@ -52,12 +55,30 @@ ConnectionAudit.belongsTo(ClassStudent, { foreignKey: 'classStudentId' });
 // old_user_id and new_user_id carry no foreign key, so they get no association.
 ConnectionAudit.belongsTo(User, { foreignKey: 'changedBy', as: 'changedByUser' });
 
-// outline
+// class groups
+ClassGroup.hasMany(SchoolClass, { foreignKey: 'groupId', onDelete: 'SET NULL' });
+SchoolClass.belongsTo(ClassGroup, { foreignKey: 'groupId' });
+
+// outline: units and lessons belong to a class or a group, and are placed in classes
 SchoolClass.hasMany(Unit, { foreignKey: 'classId', onDelete: 'CASCADE' });
 Unit.belongsTo(SchoolClass, { foreignKey: 'classId' });
+ClassGroup.hasMany(Unit, { foreignKey: 'groupId', onDelete: 'CASCADE' });
+Unit.belongsTo(ClassGroup, { foreignKey: 'groupId' });
 
 SchoolClass.hasMany(Lesson, { foreignKey: 'classId', onDelete: 'CASCADE' });
 Lesson.belongsTo(SchoolClass, { foreignKey: 'classId' });
+ClassGroup.hasMany(Lesson, { foreignKey: 'groupId', onDelete: 'CASCADE' });
+Lesson.belongsTo(ClassGroup, { foreignKey: 'groupId' });
+
+SchoolClass.hasMany(ClassUnit, { foreignKey: 'classId', onDelete: 'CASCADE' });
+ClassUnit.belongsTo(SchoolClass, { foreignKey: 'classId' });
+Unit.hasMany(ClassUnit, { foreignKey: 'unitId', onDelete: 'CASCADE' });
+ClassUnit.belongsTo(Unit, { foreignKey: 'unitId' });
+
+SchoolClass.hasMany(ClassLesson, { foreignKey: 'classId', onDelete: 'CASCADE' });
+ClassLesson.belongsTo(SchoolClass, { foreignKey: 'classId' });
+Lesson.hasMany(ClassLesson, { foreignKey: 'lessonId', onDelete: 'CASCADE' });
+ClassLesson.belongsTo(Lesson, { foreignKey: 'lessonId' });
 
 Unit.hasMany(Lesson, { foreignKey: 'unitId', onDelete: 'CASCADE' });
 Lesson.belongsTo(Unit, { foreignKey: 'unitId' });
@@ -90,13 +111,18 @@ Notification.belongsTo(Submission, { foreignKey: 'submissionId' });
 // AI grading
 Lesson.hasMany(AiJob, { foreignKey: 'lessonId', onDelete: 'CASCADE' });
 AiJob.belongsTo(Lesson, { foreignKey: 'lessonId' });
+SchoolClass.hasMany(AiJob, { foreignKey: 'classId', onDelete: 'CASCADE' });
+AiJob.belongsTo(SchoolClass, { foreignKey: 'classId' });
 AiJob.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
 
 export {
   AiJob,
   Category,
   ClassClaim,
+  ClassGroup,
+  ClassLesson,
   ClassStudent,
+  ClassUnit,
   FileRecord,
   Homework,
   Lesson,

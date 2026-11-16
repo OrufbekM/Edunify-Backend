@@ -7,6 +7,7 @@ import { app } from '../../app.js';
 import { Notification, Submission } from '../../db/models/index.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 import { notify, removeUnread } from './service.js';
 
@@ -33,12 +34,12 @@ beforeEach(async () => {
     studentPublicId: student.publicId,
   })).body.id;
   await api(student).post('/api/v1/student/claims', { classPublicId: schoolClass.publicId });
-  lessonId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Equations' })).body.id;
-  homeworkId = (await api(teacher).put(`/api/v1/lessons/${lessonId}/homework`, { type: 'text' })).body.homework.id;
+  lessonId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Equations', unitId: await firstUnitId(teacher, schoolClass.id) })).body.id;
+  homeworkId = (await api(teacher).put(`/api/v1/lessons/${lessonId}/homework?classId=${schoolClass.id}`, { type: 'text' })).body.homework.id;
 });
 
 async function submit(text = 'answer'): Promise<string> {
-  const res = await api(student).post(`/api/v1/homeworks/${homeworkId}/submissions`, { text });
+  const res = await api(student).post(`/api/v1/homeworks/${homeworkId}/submissions?classId=${schoolClass.id}`, { text });
   expect(res.status).toBe(201);
   return res.body.id;
 }

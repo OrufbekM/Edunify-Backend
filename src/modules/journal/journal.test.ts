@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { app } from '../../app.js';
 import { sequelize } from '../../db/index.js';
-import { ClassStudent, Homework, Lesson, Submission, Unit } from '../../db/models/index.js';
+import { ClassLesson, ClassStudent, Homework, Lesson, Submission } from '../../db/models/index.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 
 useTestDatabase();
@@ -29,11 +30,7 @@ let rowId: string;
 
 async function createClass(name = 'Maths 7A', owner = teacher): Promise<SchoolClass> {
   const category = await api(owner).post('/api/v1/categories', { name: `C ${randomUUID()}` });
-  const created = (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name })).body;
-  // These tests cover the v1 outline from an empty class, so the Unit 1 every new class gets
-  // (contract 8.3, tested in classes.test.ts) is removed. Plan Phase 15 rewrites them.
-  await Unit.destroy({ where: { classId: created.id } });
-  return created;
+  return (await api(owner).post('/api/v1/classes', { categoryId: category.body.id, name })).body;
 }
 
 async function addRow(fullName: string, account?: TestUser, claim = true, forClass = schoolClass): Promise<string> {
@@ -51,24 +48,22 @@ async function addUnit(title: string, forClass = schoolClass): Promise<string> {
   return (await api(teacher).post(`/api/v1/classes/${forClass.id}/units`, { title })).body.id;
 }
 
-// A lesson, with text homework unless `homework` is false.
+// A lesson, with text homework unless `homework` is false; in the class's first unit unless
+// `unitId` says otherwise.
 async function addLesson(
   title: string,
   options: { unitId?: string; homework?: boolean; forClass?: SchoolClass } = {},
 ): Promise<{ lessonId: string; homeworkId: string }> {
   const forClass = options.forClass ?? schoolClass;
-  const lessonId = (
-    await api(teacher).post(`/api/v1/classes/${forClass.id}/lessons`, {
-      title,
-      ...(options.unitId ? { unitId: options.unitId } : {}),
-    })
-  ).body.id as string;
+  const unitId = options.unitId ?? (await firstUnitId(teacher, forClass.id));
+  const lessonId = (await api(teacher).post(`/api/v1/classes/${forClass.id}/lessons`, { title, unitId })).body
+    .id as string;
 
   if (options.homework === false) {
     return { lessonId, homeworkId: '' };
   }
 
-  const lesson = await api(teacher).put(`/api/v1/lessons/${lessonId}/homework`, { type: 'text' });
+  const lesson = await api(teacher).put(`/api/v1/lessons/${lessonId}/homework?classId=${forClass.id}`, { type: 'text' });
   return { lessonId, homeworkId: lesson.body.homework.id as string };
 }
 
@@ -117,33 +112,49 @@ beforeEach(async () => {
 });
 
 describe('GET /classes/:classId/journal', () => {
-  it('lists every unit and, as columns, only lessons with homework in display order', async () => {
+  it('lists every unit and, as columns, only lessons with homework in outline order, numbered', async () => {
+    const unit1 = await firstUnitId(teacher, schoolClass.id);
     const first = await addUnit('First');
     const second = await addUnit('Second');
     const empty = await addUnit('Empty');
-    await api(teacher).patch(`/api/v1/units/${second}`, { order: 0 });
+    await api(teacher).patch(`/api/v1/units/${second}?classId=${schoolClass.id}`, { order: 0 });
     const f1 = await addLesson('f1', { unitId: first });
     await addLesson('f2 (no homework)', { unitId: first, homework: false });
     const f3 = await addLesson('f3', { unitId: first });
     const s1 = await addLesson('s1', { unitId: second });
-    const n1 = await addLesson('n1');
+    const n1 = await addLesson('n1', { unitId: unit1 });
     await addLesson('e1 (no homework)', { unitId: empty, homework: false });
-    const n2 = await addLesson('n2');
-    await api(teacher).patch(`/api/v1/lessons/${n2.lessonId}`, { order: 0 });
+    const n2 = await addLesson('n2', { unitId: unit1 });
+    await api(teacher).patch(`/api/v1/lessons/${n2.lessonId}?classId=${schoolClass.id}`, { order: 0 });
 
     const body = await journal();
 
     expect(body.units).toEqual([
       { id: second, classId: schoolClass.id, title: 'Second', order: 0 },
-      { id: first, classId: schoolClass.id, title: 'First', order: 1 },
-      { id: empty, classId: schoolClass.id, title: 'Empty', order: 2 },
+      { id: unit1, classId: schoolClass.id, title: 'Unit 1', order: 1 },
+      { id: first, classId: schoolClass.id, title: 'First', order: 2 },
+      { id: empty, classId: schoolClass.id, title: 'Empty', order: 3 },
     ]);
+    // Numbers count every lesson, so f2 (no homework, no column) leaves a gap at 5.
     expect(body.columns).toEqual([
-      { lessonId: n2.lessonId, title: 'n2', unitId: null },
-      { lessonId: n1.lessonId, title: 'n1', unitId: null },
-      { lessonId: s1.lessonId, title: 's1', unitId: second },
-      { lessonId: f1.lessonId, title: 'f1', unitId: first },
-      { lessonId: f3.lessonId, title: 'f3', unitId: first },
+      { lessonId: s1.lessonId, number: 1, title: 's1', unitId: second },
+      { lessonId: n2.lessonId, number: 2, title: 'n2', unitId: unit1 },
+      { lessonId: n1.lessonId, number: 3, title: 'n1', unitId: unit1 },
+      { lessonId: f1.lessonId, number: 4, title: 'f1', unitId: first },
+      { lessonId: f3.lessonId, number: 6, title: 'f3', unitId: first },
+    ]);
+  });
+
+  it('keeps hidden lessons, with their numbers', async () => {
+    const a = await addLesson('A');
+    const b = await addLesson('B');
+    await api(teacher).patch(`/api/v1/lessons/${a.lessonId}?classId=${schoolClass.id}`, { visible: false });
+
+    const { columns } = await journal();
+
+    expect(columns.map((column: { lessonId: string; number: number }) => [column.lessonId, column.number])).toEqual([
+      [a.lessonId, 1],
+      [b.lessonId, 2],
     ]);
   });
 
@@ -151,7 +162,7 @@ describe('GET /classes/:classId/journal', () => {
     const [one, two] = [await addUnit('One'), await addUnit('Two')];
     // Puts the unit with the smaller id last, so that id order and unit order disagree.
     const [low, high] = one < two ? [one, two] : [two, one];
-    await api(teacher).patch(`/api/v1/units/${low}`, { order: 1 });
+    await api(teacher).patch(`/api/v1/units/${low}?classId=${schoolClass.id}`, { order: 2 });
     const inLow = await addLesson('in low', { unitId: low });
     const inHigh = await addLesson('in high', { unitId: high });
 
@@ -165,10 +176,11 @@ describe('GET /classes/:classId/journal', () => {
     const zRow = await addRow('Zara', awaiting, false);
     const bRow = await addRow('bobur');
     const { lessonId } = await addLesson('L');
+    const unit1 = await firstUnitId(teacher, schoolClass.id);
 
     await expect(journal()).resolves.toEqual({
-      units: [],
-      columns: [{ lessonId, title: 'L', unitId: null }],
+      units: [{ id: unit1, classId: schoolClass.id, title: 'Unit 1', order: 0 }],
+      columns: [{ lessonId, number: 1, title: 'L', unitId: unit1 }],
       rows: [
         {
           classStudentId: rowId,
@@ -246,7 +258,7 @@ describe('GET /classes/:classId/journal', () => {
 
   it('gives a class without lessons empty columns and cells', async () => {
     await expect(journal()).resolves.toEqual({
-      units: [],
+      units: [{ id: await firstUnitId(teacher, schoolClass.id), classId: schoolClass.id, title: 'Unit 1', order: 0 }],
       columns: [],
       rows: [{ classStudentId: rowId, fullName: 'Ali Valiyev', connectionState: 'connected', cells: [], average: null }],
     });
@@ -256,26 +268,33 @@ describe('GET /classes/:classId/journal', () => {
     const { homeworkId } = await addLesson('Before');
     await addVersion(homeworkId, rowId, 1, 4);
 
+    const unitId = await firstUnitId(teacher, schoolClass.id);
+    const realQuery = sequelize.query.bind(sequelize) as (...args: unknown[]) => Promise<unknown>;
+    let committed = false;
+
     // Commits, from another connection right after the units are read, a new homework
     // with a grade, a new roster row, and a better grade on the first homework.
-    Unit.addHook('afterFind', 'commitAfterUnits', async () => {
-      Unit.removeHook('afterFind', 'commitAfterUnits');
-      const lesson = await Lesson.create({ classId: schoolClass.id, unitId: null, title: 'Late', position: 1, lessonFileId: null });
-      const late = await Homework.create({ lessonId: lesson.id, type: 'text', instructionsText: null, instructionsFileId: null });
-      await addVersion(late.id, rowId, 1, 2);
-      await addVersion(homeworkId, rowId, 2, 5);
-      await ClassStudent.create({ classId: schoolClass.id, fullName: 'Late Row', studentUserId: null });
-    });
+    vi.spyOn(sequelize, 'query').mockImplementation((async (...args: unknown[]) => {
+      const result = await realQuery(...args);
+      if (!committed && String(args[0]).includes('FROM class_units')) {
+        committed = true;
+        const lesson = await Lesson.create({ classId: schoolClass.id, groupId: null, unitId, title: 'Late', position: null, lessonFileId: null });
+        await ClassLesson.create({ classId: schoolClass.id, lessonId: lesson.id, position: 1 });
+        const late = await Homework.create({ lessonId: lesson.id, type: 'text', instructionsText: null, instructionsFileId: null });
+        await addVersion(late.id, rowId, 1, 2);
+        await addVersion(homeworkId, rowId, 2, 5);
+        await ClassStudent.create({ classId: schoolClass.id, fullName: 'Late Row', studentUserId: null });
+      }
+      return result;
+    }) as never);
 
-    try {
-      const body = await journal();
+    const body = await journal();
 
-      expect(body.columns.map((column: { title: string }) => column.title)).toEqual(['Before']);
-      expect(body.rows).toEqual([expect.objectContaining({ fullName: 'Ali Valiyev', average: 4 })]);
-      expect(body.rows[0].cells).toEqual([expect.objectContaining({ status: 'graded', value: 4 })]);
-    } finally {
-      Unit.removeHook('afterFind', 'commitAfterUnits');
-    }
+    expect(committed).toBe(true);
+    expect(body.columns.map((column: { title: string }) => column.title)).toEqual(['Before']);
+    expect(body.rows).toEqual([expect.objectContaining({ fullName: 'Ali Valiyev', average: 4 })]);
+    expect(body.rows[0].cells).toEqual([expect.objectContaining({ status: 'graded', value: 4 })]);
+    vi.restoreAllMocks();
 
     expect((await journal()).columns).toHaveLength(2);
   });
@@ -313,7 +332,7 @@ describe('GET /student/grades', () => {
     await expect(grades()).resolves.toEqual([
       {
         class: { id: biology.id, name: 'biology' },
-        columns: [{ lessonId, title: 'Cells', unitId: null }],
+        columns: [{ lessonId, number: 1, title: 'Cells', unitId: await firstUnitId(teacher, biology.id) }],
         cells: [{ lessonId, status: 'graded', value: 5, submissionId: graded.id }],
         average: 5,
       },
@@ -340,15 +359,15 @@ describe('GET /student/grades', () => {
 
     expect(item).toMatchObject({
       columns: [
-        { lessonId: loose.lessonId, title: 'Loose', unitId: null },
-        { lessonId: inUnit.lessonId, title: 'In unit', unitId: unit },
+        { lessonId: loose.lessonId, number: 1, title: 'Loose', unitId: await firstUnitId(teacher, schoolClass.id) },
+        { lessonId: inUnit.lessonId, number: 3, title: 'In unit', unitId: unit },
       ],
       cells: journalRow.cells,
       average: 3,
     });
   });
 
-  it('drops a class once the row is re-linked to another account', async () => {
+  it('drops a class once the row is reconnected to another account', async () => {
     const newAccount = await createTestUser('student');
 
     await api(teacher).patch(`/api/v1/classes/${schoolClass.id}/students/${rowId}`, {

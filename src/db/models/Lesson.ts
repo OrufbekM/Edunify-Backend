@@ -11,12 +11,15 @@ import { sequelize } from '../index.js';
 
 export class Lesson extends Model<InferAttributes<Lesson>, InferCreationAttributes<Lesson>> {
   declare id: CreationOptional<string>;
-  declare classId: string;
-  // Null puts the lesson in the no-unit group, which sorts first (contract section 8.6).
-  declare unitId: string | null;
+  // Exactly one of the two is set: class-only, or linked and owned by a group (contract 4.1).
+  declare classId: string | null;
+  declare groupId: string | null;
+  // Every lesson sits in a unit (contract 4).
+  declare unitId: string;
   declare title: string;
-  // Dense and 0-based within the unit, or within the no-unit group.
-  declare position: number;
+  // A linked lesson's place in its unit's linked order, shared by the group; null for a
+  // class-only lesson, whose slot is on its ClassLesson.
+  declare position: number | null;
   declare lessonFileId: string | null;
   declare createdAt: CreationOptional<Date>;
   declare updatedAt: CreationOptional<Date>;
@@ -30,10 +33,11 @@ Lesson.init(
       allowNull: false,
       defaultValue: Sequelize.literal('gen_random_uuid()'),
     },
-    classId: { type: DataTypes.UUID, allowNull: false },
-    unitId: { type: DataTypes.UUID, allowNull: true },
+    classId: { type: DataTypes.UUID, allowNull: true },
+    groupId: { type: DataTypes.UUID, allowNull: true },
+    unitId: { type: DataTypes.UUID, allowNull: false },
     title: { type: DataTypes.TEXT, allowNull: false },
-    position: { type: DataTypes.INTEGER, allowNull: false },
+    position: { type: DataTypes.INTEGER, allowNull: true },
     lessonFileId: { type: DataTypes.UUID, allowNull: true },
     createdAt: { type: DataTypes.DATE, allowNull: false },
     updatedAt: { type: DataTypes.DATE, allowNull: false },

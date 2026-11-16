@@ -11,7 +11,6 @@ import type {
 import {
   ClassStudent,
   Homework,
-  Lesson,
   SchoolClass,
   Submission,
   SubmissionPage,
@@ -23,6 +22,7 @@ import { getOwnClass } from '../classes/service.js';
 import { createFileRecord, withStoredFiles } from '../files/service.js';
 import { notify, removeUnread } from '../notifications/service.js';
 import { getConnectedClassStudent } from '../students/service.js';
+import { assertVisibleToStudent, findPlacement } from '../lessons/placements.js';
 
 const VERSION_CAP = 30;
 
@@ -123,13 +123,13 @@ const SELECT_SUBMISSIONS = `
          s.updated_at AS "updatedAt",
          h.type AS "homeworkType",
          h.lesson_id AS "lessonId",
-         l.class_id AS "classId",
+         cs.class_id AS "classId",
          s.version = (SELECT max(v.version) FROM submissions v
                        WHERE v.homework_id = s.homework_id
                          AND v.class_student_id = s.class_student_id) AS "isLatest"
     FROM submissions s
     JOIN homeworks h ON h.id = s.homework_id
-    JOIN lessons l ON l.id = h.lesson_id`;
+    JOIN class_students cs ON cs.id = s.class_student_id`;
 
 async function submissionRows(
   where: string,
@@ -340,26 +340,17 @@ function isPageType(type: HomeworkType): type is PageType {
   return type === 'draw' || type === 'math' || type === 'photo';
 }
 
-async function classIdOf(homework: Homework, transaction?: Transaction): Promise<string> {
-  const lesson = await Lesson.findByPk(homework.lessonId, { attributes: ['classId'], transaction });
-
-  if (!lesson) {
-    throw homeworkNotFound();
-  }
-
-  return lesson.classId;
-}
-
-// For the route to call before multer reads a body (plan, Phase 8): the homework exists and
-// the caller is connected to its class. Returns the type, which picks the body.
-export async function assertCanSubmit(userId: string, homeworkId: string): Promise<HomeworkType> {
+// For the route to call before multer reads a body (plan, Phase 8): the homework exists, the
+// caller is connected to the class, and the class shows its lesson (contract 5). Returns the
+// type, which picks the body.
+export async function assertCanSubmit(userId: string, classId: string, homeworkId: string): Promise<HomeworkType> {
   const homework = await Homework.findByPk(homeworkId, { attributes: ['lessonId', 'type'] });
 
   if (!homework) {
     throw homeworkNotFound();
   }
 
-  await notFoundAs(getConnectedClassStudent(userId, await classIdOf(homework)), homeworkNotFound);
+  await assertVisibleToStudent(userId, classId, homework.lessonId, homeworkNotFound);
 
   return homework.type;
 }
@@ -370,6 +361,7 @@ export async function assertCanSubmit(userId: string, homeworkId: string): Promi
 // versions one at a time and keeps a reconnect or disconnect from slipping past the connection check.
 export async function createSubmission(
   userId: string,
+  classId: string,
   homeworkId: string,
   content: NewSubmissionContent,
 ): Promise<SubmissionDto> {
@@ -396,11 +388,15 @@ export async function createSubmission(
           ]);
         }
 
-        const classId = await classIdOf(homework, transaction);
         const row: ClassStudent = await notFoundAs(
           getConnectedClassStudent(userId, classId, transaction, { lock: true }),
           homeworkNotFound,
         );
+        const placement = await findPlacement(classId, homework.lessonId, transaction);
+
+        if (!placement?.visible) {
+          throw homeworkNotFound();
+        }
         const previous = await Submission.findOne({
           where: { homeworkId, classStudentId: row.id },
           order: [['version', 'DESC']],
@@ -520,7 +516,7 @@ export async function listMySubmissions(
        JOIN class_students cs ON cs.id = s.class_student_id
        JOIN homeworks h ON h.id = s.homework_id
        JOIN lessons l ON l.id = h.lesson_id
-       JOIN classes c ON c.id = l.class_id
+       JOIN classes c ON c.id = cs.class_id
       WHERE cs.student_user_id = $userId
         ${filter.classId ? 'AND cs.class_id = $classId' : ''}
         AND EXISTS (SELECT 1 FROM class_claims cc

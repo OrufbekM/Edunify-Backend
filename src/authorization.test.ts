@@ -209,80 +209,86 @@ const MATRIX: Record<string, Case> = {
     role: 'teacher',
     resource: 'unitId',
     ok: [['owner', 200]],
-    send: (u, f) => call('patch', `${V1}/units/${f.unitId}`, u, { title: 'Renamed' }),
+    send: (u, f) => call('patch', `${V1}/units/${f.unitId}?classId=${f.classId}`, u, { title: 'Renamed' }),
   },
   'DELETE /api/v1/units/:id': {
     role: 'teacher',
     resource: 'unitId',
     ok: [['owner', 204]],
-    send: (u, f) => call('delete', `${V1}/units/${f.unitId}`, u),
+    send: (u, f) => call('delete', `${V1}/units/${f.unitId}?classId=${f.classId}`, u),
   },
   'POST /api/v1/classes/:classId/lessons': {
     role: 'teacher',
     resource: 'classId',
     ok: [['owner', 201]],
-    send: (u, f) => call('post', `${V1}/classes/${f.classId}/lessons`, u, { title: 'Lesson 2' }),
+    send: (u, f) => call('post', `${V1}/classes/${f.classId}/lessons`, u, { title: 'Lesson 2', unitId: f.unitId }),
   },
   'GET /api/v1/lessons/:id': {
     role: 'both',
     resource: 'lessonId',
     ok: [['owner', 200], ['student', 200]],
-    send: (u, f) => call('get', `${V1}/lessons/${f.lessonId}`, u),
+    send: (u, f) => call('get', `${V1}/lessons/${f.lessonId}?classId=${f.classId}`, u),
   },
   'PATCH /api/v1/lessons/:id': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('patch', `${V1}/lessons/${f.lessonId}`, u, { title: 'Renamed' }),
+    send: (u, f) => call('patch', `${V1}/lessons/${f.lessonId}?classId=${f.classId}`, u, { title: 'Renamed' }),
   },
   'DELETE /api/v1/lessons/:id': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 204]],
-    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}`, u),
+    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}?classId=${f.classId}`, u),
+  },
+  'GET /api/v1/lessons/:id/impact': {
+    role: 'teacher',
+    resource: 'lessonId',
+    ok: [['owner', 200]],
+    send: (u, f) => call('get', `${V1}/lessons/${f.lessonId}/impact?classId=${f.classId}`, u),
   },
   'PUT /api/v1/lessons/:id/lesson-file': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => upload(`${V1}/lessons/${f.lessonId}/lesson-file`, u),
+    send: (u, f) => upload(`${V1}/lessons/${f.lessonId}/lesson-file?classId=${f.classId}`, u),
   },
   'DELETE /api/v1/lessons/:id/lesson-file': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/lesson-file`, u),
+    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/lesson-file?classId=${f.classId}`, u),
   },
   'PUT /api/v1/lessons/:id/homework': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('put', `${V1}/lessons/${f.lessonId}/homework`, u, { type: 'text' }),
+    send: (u, f) => call('put', `${V1}/lessons/${f.lessonId}/homework?classId=${f.classId}`, u, { type: 'text' }),
   },
   'DELETE /api/v1/lessons/:id/homework': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/homework`, u),
+    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/homework?classId=${f.classId}`, u),
   },
   'PUT /api/v1/lessons/:id/homework/file': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => upload(`${V1}/lessons/${f.lessonId}/homework/file`, u),
+    send: (u, f) => upload(`${V1}/lessons/${f.lessonId}/homework/file?classId=${f.classId}`, u),
   },
   'DELETE /api/v1/lessons/:id/homework/file': {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/homework/file`, u),
+    send: (u, f) => call('delete', `${V1}/lessons/${f.lessonId}/homework/file?classId=${f.classId}`, u),
   },
 
   'POST /api/v1/homeworks/:homeworkId/submissions': {
     role: 'student',
     resource: 'homeworkId',
     ok: [['student', 201]],
-    send: (u, f) => call('post', `${V1}/homeworks/${f.homeworkId}/submissions`, u, { text: 'Again' }),
+    send: (u, f) => call('post', `${V1}/homeworks/${f.homeworkId}/submissions?classId=${f.classId}`, u, { text: 'Again' }),
   },
   'GET /api/v1/submissions/:id': {
     role: 'both',
@@ -295,7 +301,7 @@ const MATRIX: Record<string, Case> = {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 200]],
-    send: (u, f) => call('get', `${V1}/lessons/${f.lessonId}/grading`, u),
+    send: (u, f) => call('get', `${V1}/lessons/${f.lessonId}/grading?classId=${f.classId}`, u),
   },
   'PUT /api/v1/submissions/:id/grade': {
     role: 'teacher',
@@ -320,7 +326,7 @@ const MATRIX: Record<string, Case> = {
     role: 'teacher',
     resource: 'lessonId',
     ok: [['owner', 202]],
-    send: (u, f) => call('post', `${V1}/lessons/${f.lessonId}/ai-grade`, u),
+    send: (u, f) => call('post', `${V1}/lessons/${f.lessonId}/ai-grade?classId=${f.classId}`, u),
   },
   'GET /api/v1/ai-jobs/:id': {
     role: 'teacher',
@@ -442,14 +448,15 @@ async function buildFixture(): Promise<Fixture> {
   const unit = await api(owner).post(`/api/v1/classes/${classId}/units`, { title: 'Unit 1' });
   const lesson = await api(owner).post(`/api/v1/classes/${classId}/lessons`, { title: 'Lesson 1', unitId: unit.body.id });
   const lessonId = lesson.body.id as string;
-  const homework = await api(owner).put(`/api/v1/lessons/${lessonId}/homework`, { type: 'text' });
-  await api(owner).upload(`/api/v1/lessons/${lessonId}/lesson-file`, MD, 'lesson.md');
-  await api(owner).upload(`/api/v1/lessons/${lessonId}/homework/file`, MD, 'task.md');
+  const homework = await api(owner).put(`/api/v1/lessons/${lessonId}/homework?classId=${classId}`, { type: 'text' });
+  await api(owner).upload(`/api/v1/lessons/${lessonId}/lesson-file?classId=${classId}`, MD, 'lesson.md');
+  await api(owner).upload(`/api/v1/lessons/${lessonId}/homework/file?classId=${classId}`, MD, 'task.md');
   const homeworkId = homework.body.homework.id as string;
-  const submission = await api(student).post(`/api/v1/homeworks/${homeworkId}/submissions`, { text: 'x = 3' });
+  const submission = await api(student).post(`/api/v1/homeworks/${homeworkId}/submissions?classId=${classId}`, { text: 'x = 3' });
   const [notification] = (await api(owner).get('/api/v1/notifications')).body.items;
   const job = await AiJob.create({
     lessonId,
+    classId,
     createdBy: owner.id,
     status: 'done',
     submissionIds: [submission.body.id],

@@ -25,6 +25,10 @@ export const uuidSchema = z.uuid();
 
 export const idParamsSchema = z.strictObject({ id: uuidSchema });
 
+// Contract 8.6: every request addressed by a unit, lesson or homework id names the class it
+// is about, so placement and visibility resolve per class.
+export const classQuerySchema = z.strictObject({ classId: uuidSchema });
+
 // For GET routes that take no query parameters: unknown ones are rejected too.
 export const emptyQuerySchema = z.strictObject({});
 

@@ -10,6 +10,7 @@ import type { HomeworkType } from '../../db/models/enums.js';
 import { ClassStudent, Homework, Lesson, Notification, Submission } from '../../db/models/index.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 
@@ -43,19 +44,19 @@ async function addRow(fullName: string, account?: TestUser, claim = true): Promi
 }
 
 async function addHomework(type: HomeworkType = 'text', title = 'Fractions') {
-  const lesson = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title })).body.id as string;
-  const res = await api(teacher).put(`/api/v1/lessons/${lesson}/homework`, { type, instructionsText: 'Solve it' });
+  const lesson = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title, unitId: await firstUnitId(teacher, schoolClass.id) })).body.id as string;
+  const res = await api(teacher).put(`/api/v1/lessons/${lesson}/homework?classId=${schoolClass.id}`, { type, instructionsText: 'Solve it' });
   return { lessonId: lesson, homeworkId: res.body.homework.id as string };
 }
 
 async function submit(text = 'My answer', user = student, forHomework = homeworkId): Promise<string> {
-  const res = await api(user).post(`/api/v1/homeworks/${forHomework}/submissions`, { text });
+  const res = await api(user).post(`/api/v1/homeworks/${forHomework}/submissions?classId=${schoolClass.id}`, { text });
   expect(res.status).toBe(201);
   return res.body.id as string;
 }
 
 const gradePath = (submissionId: string) => `/api/v1/submissions/${submissionId}/grade`;
-const gradingPath = (forLesson: string) => `/api/v1/lessons/${forLesson}/grading`;
+const gradingPath = (forLesson: string) => `/api/v1/lessons/${forLesson}/grading?classId=${schoolClass.id}`;
 
 function expectError(res: request.Response, status: number, code: string): void {
   expect(res.status).toBe(status);
@@ -171,7 +172,7 @@ describe('GET /lessons/:lessonId/grading', () => {
   });
 
   it('gives a lesson without homework the same 404 as a missing lesson', async () => {
-    const bare = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Bare' })).body.id;
+    const bare = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Bare', unitId: await firstUnitId(teacher, schoolClass.id) })).body.id;
 
     const withoutHomework = await api(teacher).get(gradingPath(bare));
     const missing = await api(teacher).get(gradingPath(randomUUID()));
@@ -193,7 +194,7 @@ describe('GET /lessons/:lessonId/grading', () => {
     expectError(await api(student).get(gradingPath(lessonId)), 403, 'FORBIDDEN');
     expectError(await request(app).get(gradingPath(lessonId)), 401, 'UNAUTHENTICATED');
     expectError(await api(teacher).get(gradingPath('nope')), 400, 'VALIDATION_ERROR');
-    expectError(await api(teacher).get(`${gradingPath(lessonId)}?all=1`), 400, 'VALIDATION_ERROR');
+    expectError(await api(teacher).get(`${gradingPath(lessonId)}&all=1`), 400, 'VALIDATION_ERROR');
   });
 });
 

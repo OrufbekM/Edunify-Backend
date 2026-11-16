@@ -2,9 +2,9 @@ import { QueryTypes, Transaction } from 'sequelize';
 
 import { sequelize } from '../../db/index.js';
 import type { SubmissionStatus } from '../../db/models/enums.js';
-import { Unit } from '../../db/models/index.js';
 import { getOwnClass } from '../classes/service.js';
-import { toUnitDto, type UnitDto } from '../lessons/service.js';
+import { buildOutline, type ClassOutline } from '../lessons/placements.js';
+import type { UnitDto } from '../lessons/service.js';
 import { listMyClasses, rosterRows, type ConnectionState } from '../students/service.js';
 import type { Grade } from '../submissions/service.js';
 
@@ -13,8 +13,9 @@ export type CellStatus = 'empty' | SubmissionStatus;
 
 export interface JournalColumnDto {
   lessonId: string;
+  number: number;
   title: string;
-  unitId: string | null;
+  unitId: string;
 }
 
 export interface JournalCellDto {
@@ -65,21 +66,22 @@ interface Marks {
   average: number | null;
 }
 
-// Only lessons with homework, in display order: no-unit lessons first, then unit order,
-// then lesson order (contract 8.10), the order the outline uses.
-async function columnsOf(classIds: string[], transaction: Transaction): Promise<Column[]> {
-  return sequelize.query<Column>(
-    `SELECT l.class_id AS "classId",
-            l.id AS "lessonId",
-            l.title,
-            l.unit_id AS "unitId",
-            h.id AS "homeworkId"
-       FROM lessons l
-       JOIN homeworks h ON h.lesson_id = l.id
-       LEFT JOIN units u ON u.id = l.unit_id
-      WHERE l.class_id = ANY($classIds::uuid[])
-      ORDER BY l.class_id, u.position NULLS FIRST, u.id NULLS FIRST, l.position, l.id`,
-    { bind: { classIds }, type: QueryTypes.SELECT, transaction },
+// Only lessons with homework, in outline order, each with its number (contract 8.10). The
+// teacher's journal keeps hidden lessons; a student's grades leave them out (contract 4.1).
+function columnsFrom(classId: string, outline: ClassOutline, { visibleOnly }: { visibleOnly: boolean }): Column[] {
+  return outline.lessons.flatMap((lesson) =>
+    lesson.homeworkId && (lesson.visible || !visibleOnly)
+      ? [
+          {
+            classId,
+            lessonId: lesson.id,
+            number: lesson.number,
+            title: lesson.title,
+            unitId: lesson.unitId,
+            homeworkId: lesson.homeworkId,
+          },
+        ]
+      : [],
   );
 }
 
@@ -122,7 +124,7 @@ async function marksOf(
 }
 
 function toColumnDto(column: Column): JournalColumnDto {
-  return { lessonId: column.lessonId, title: column.title, unitId: column.unitId };
+  return { lessonId: column.lessonId, number: column.number, title: column.title, unitId: column.unitId };
 }
 
 // Parallel to columns: same length, same order (contract 8.10).
@@ -156,15 +158,8 @@ export async function getJournal(teacherId: string, classId: string): Promise<Jo
   return inSnapshot(async (transaction) => {
     await getOwnClass(teacherId, classId, transaction);
 
-    const units = await Unit.findAll({
-      where: { classId },
-      order: [
-        ['position', 'ASC'],
-        ['id', 'ASC'],
-      ],
-      transaction,
-    });
-    const columns = await columnsOf([classId], transaction);
+    const outline = await buildOutline(classId, transaction);
+    const columns = columnsFrom(classId, outline, { visibleOnly: false });
     const roster = await rosterRows(classId, { transaction });
     const marks = await marksOf(
       roster.map((row) => row.id),
@@ -172,7 +167,7 @@ export async function getJournal(teacherId: string, classId: string): Promise<Jo
     );
 
     return {
-      units: units.map(toUnitDto),
+      units: outline.units.map((unit) => ({ id: unit.id, classId, title: unit.title, order: unit.order })),
       columns: columns.map(toColumnDto),
       rows: roster.map((row) => ({
         classStudentId: row.id,
@@ -195,10 +190,10 @@ export async function listMyGrades(userId: string): Promise<StudentGradesItemDto
       return [];
     }
 
-    const columns = await columnsOf(
-      classes.map((item) => item.id),
-      transaction,
-    );
+    const columns: Column[] = [];
+    for (const item of classes) {
+      columns.push(...columnsFrom(item.id, await buildOutline(item.id, transaction), { visibleOnly: true }));
+    }
     const marks = await marksOf(
       classes.map((item) => item.classStudentId),
       transaction,

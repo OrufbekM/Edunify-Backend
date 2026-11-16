@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
+import { classQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
@@ -15,9 +15,9 @@ const teacherOnly = requireRole('teacher');
 
 gradingRouter.get('/lessons/:lessonId/grading', requireAuth, generalLimiter, teacherOnly, async (req, res) => {
   const { lessonId } = lessonParams.parse(req.params);
-  emptyQuerySchema.parse(req.query);
+  const { classId } = classQuerySchema.parse(req.query);
 
-  res.json(await grading.getGrading(getAuth(req).id, lessonId));
+  res.json(await grading.getGrading(getAuth(req).id, classId, lessonId));
 });
 
 gradingRouter.put('/submissions/:id/grade', requireAuth, generalLimiter, teacherOnly, async (req, res) => {

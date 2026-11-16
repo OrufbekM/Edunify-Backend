@@ -5,6 +5,7 @@ import { sequelize } from '../../db/index.js';
 import { FileRecord, Lesson, SchoolClass } from '../../db/models/index.js';
 import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
+import { firstUnitId } from '../../test/content.js';
 import { addSubmission, isStored, storeFile, waitUntilBlocked } from '../../test/files.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
 
@@ -23,7 +24,7 @@ interface Fixture {
   classId: string;
   unitId: string;
   inUnit: string;
-  noUnit: string;
+  inFirstUnit: string;
   rowA: string;
   rowB: string;
   files: Record<
@@ -31,8 +32,8 @@ interface Fixture {
     | 'inUnitInstructions'
     | 'inUnitPagesA'
     | 'inUnitPagesB'
-    | 'noUnitFile'
-    | 'noUnitPagesA'
+    | 'inFirstUnitFile'
+    | 'inFirstUnitPagesA'
     | 'otherClassFile',
     string[]
   >;
@@ -45,18 +46,21 @@ async function createClass(): Promise<{ id: string; publicId: string }> {
   return (await api(teacher).post('/api/v1/classes', { categoryId: category.body.id, name: 'Maths' })).body;
 }
 
-async function addLesson(classId: string, title: string, unitId: string | null = null): Promise<string> {
-  return (await api(teacher).post(`/api/v1/classes/${classId}/lessons`, { title, unitId })).body.id;
+// Without a unit, the lesson goes in the class's first unit.
+async function addLesson(classId: string, title: string, unitId?: string): Promise<string> {
+  const unit = unitId ?? (await firstUnitId(teacher, classId));
+  return (await api(teacher).post(`/api/v1/classes/${classId}/lessons`, { title, unitId: unit })).body.id;
 }
 
-async function uploadLessonFile(lessonId: string): Promise<string> {
-  return (await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file`, PDF, 'lesson.pdf')).body.lessonFile.id;
+async function uploadLessonFile(classId: string, lessonId: string): Promise<string> {
+  return (await api(teacher).upload(`/api/v1/lessons/${lessonId}/lesson-file?classId=${classId}`, PDF, 'lesson.pdf'))
+    .body.lessonFile.id;
 }
 
-async function addHomework(lessonId: string, withFile: boolean): Promise<string> {
-  const { homework } = (await api(teacher).put(`/api/v1/lessons/${lessonId}/homework`, { type: 'photo' })).body;
+async function addHomework(classId: string, lessonId: string, withFile: boolean): Promise<string> {
+  const { homework } = (await api(teacher).put(`/api/v1/lessons/${lessonId}/homework?classId=${classId}`, { type: 'photo' })).body;
   if (withFile) {
-    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file`, PDF, 'task.pdf');
+    await api(teacher).upload(`/api/v1/lessons/${lessonId}/homework/file?classId=${classId}`, PDF, 'task.pdf');
   }
   return homework.id;
 }
@@ -101,24 +105,25 @@ beforeEach(async () => {
   const schoolClass = await createClass();
   const unitId = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/units`, { title: 'Unit' })).body.id;
   const inUnit = await addLesson(schoolClass.id, 'In the unit', unitId);
-  const noUnit = await addLesson(schoolClass.id, 'No unit');
+  const inFirstUnit = await addLesson(schoolClass.id, 'In the first unit');
   const a = await linkStudent(schoolClass.id, schoolClass.publicId);
   const b = await linkStudent(schoolClass.id, schoolClass.publicId);
 
-  const inUnitFile = await uploadLessonFile(inUnit);
-  const inUnitHomework = await addHomework(inUnit, true);
-  const noUnitFile = await uploadLessonFile(noUnit);
-  const noUnitHomework = await addHomework(noUnit, false);
-  const instructions = (await api(teacher).get(`/api/v1/lessons/${inUnit}`)).body.homework.instructionsFile.id;
+  const inUnitFile = await uploadLessonFile(schoolClass.id, inUnit);
+  const inUnitHomework = await addHomework(schoolClass.id, inUnit, true);
+  const inFirstUnitFile = await uploadLessonFile(schoolClass.id, inFirstUnit);
+  const inFirstUnitHomework = await addHomework(schoolClass.id, inFirstUnit, false);
+  const instructions = (await api(teacher).get(`/api/v1/lessons/${inUnit}?classId=${schoolClass.id}`)).body.homework
+    .instructionsFile.id;
 
   const other = await createClass();
-  const otherClassFile = await uploadLessonFile(await addLesson(other.id, 'Elsewhere'));
+  const otherClassFile = await uploadLessonFile(other.id, await addLesson(other.id, 'Elsewhere'));
 
   fixture = {
     classId: schoolClass.id,
     unitId,
     inUnit,
-    noUnit,
+    inFirstUnit,
     rowA: a.rowId,
     rowB: b.rowId,
     files: {
@@ -126,8 +131,8 @@ beforeEach(async () => {
       inUnitInstructions: [instructions],
       inUnitPagesA: await pagesOf(inUnitHomework, a.rowId, a.user.id, 2),
       inUnitPagesB: await pagesOf(inUnitHomework, b.rowId, b.user.id, 1),
-      noUnitFile: [noUnitFile],
-      noUnitPagesA: await pagesOf(noUnitHomework, a.rowId, a.user.id, 1),
+      inFirstUnitFile: [inFirstUnitFile],
+      inFirstUnitPagesA: await pagesOf(inFirstUnitHomework, a.rowId, a.user.id, 1),
       otherClassFile: [otherClassFile],
     },
   };
@@ -140,7 +145,7 @@ describe('deleting removes exactly the files it orphans, rows and bytes', () => 
     expect((await api(teacher).delete(`/api/v1/classes/${fixture.classId}`)).status).toBe(204);
 
     await expectOnlyRemoved(
-      ['inUnitFile', 'inUnitInstructions', 'inUnitPagesA', 'inUnitPagesB', 'noUnitFile', 'noUnitPagesA'],
+      ['inUnitFile', 'inUnitInstructions', 'inUnitPagesA', 'inUnitPagesB', 'inFirstUnitFile', 'inFirstUnitPagesA'],
       keys,
     );
   });
@@ -150,13 +155,13 @@ describe('deleting removes exactly the files it orphans, rows and bytes', () => 
 
     expect((await api(teacher).delete(`/api/v1/classes/${fixture.classId}/students/${fixture.rowA}`)).status).toBe(204);
 
-    await expectOnlyRemoved(['inUnitPagesA', 'noUnitPagesA'], keys);
+    await expectOnlyRemoved(['inUnitPagesA', 'inFirstUnitPagesA'], keys);
   });
 
   it('a unit: the files of its lessons', async () => {
     const keys = await allKeys();
 
-    expect((await api(teacher).delete(`/api/v1/units/${fixture.unitId}`)).status).toBe(204);
+    expect((await api(teacher).delete(`/api/v1/units/${fixture.unitId}?classId=${fixture.classId}`)).status).toBe(204);
 
     await expectOnlyRemoved(['inUnitFile', 'inUnitInstructions', 'inUnitPagesA', 'inUnitPagesB'], keys);
   });
@@ -164,15 +169,15 @@ describe('deleting removes exactly the files it orphans, rows and bytes', () => 
   it('a lesson: its file and its pages', async () => {
     const keys = await allKeys();
 
-    expect((await api(teacher).delete(`/api/v1/lessons/${fixture.noUnit}`)).status).toBe(204);
+    expect((await api(teacher).delete(`/api/v1/lessons/${fixture.inFirstUnit}?classId=${fixture.classId}`)).status).toBe(204);
 
-    await expectOnlyRemoved(['noUnitFile', 'noUnitPagesA'], keys);
+    await expectOnlyRemoved(['inFirstUnitFile', 'inFirstUnitPagesA'], keys);
   });
 
   it('a homework: its instructions and pages, not the lesson file', async () => {
     const keys = await allKeys();
 
-    expect((await api(teacher).delete(`/api/v1/lessons/${fixture.inUnit}/homework`)).status).toBe(200);
+    expect((await api(teacher).delete(`/api/v1/lessons/${fixture.inUnit}/homework?classId=${fixture.classId}`)).status).toBe(200);
 
     await expectOnlyRemoved(['inUnitInstructions', 'inUnitPagesA', 'inUnitPagesB'], keys);
   });
@@ -223,7 +228,7 @@ describe('a delete waits for a file that is being attached, then removes it too'
   });
 
   it('a roster row delete and a submission being saved', async () => {
-    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.inUnit}`)).body.homework.id;
+    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.inUnit}?classId=${fixture.classId}`)).body.homework.id;
     const { transaction, files } = await holdOpen(async (t) => {
       const { pages } = await addSubmission({
         homeworkId,
@@ -247,7 +252,7 @@ describe('a delete waits for a file that is being attached, then removes it too'
   });
 
   it('a lesson delete and a submission being saved', async () => {
-    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.noUnit}`)).body.homework.id;
+    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.inFirstUnit}?classId=${fixture.classId}`)).body.homework.id;
     const { transaction, files } = await holdOpen(async (t) => {
       const { pages } = await addSubmission({
         homeworkId,
@@ -258,7 +263,7 @@ describe('a delete waits for a file that is being attached, then removes it too'
       });
       return pages;
     });
-    const deleting = api(teacher).delete(`/api/v1/lessons/${fixture.noUnit}`).then((res) => res);
+    const deleting = api(teacher).delete(`/api/v1/lessons/${fixture.inFirstUnit}?classId=${fixture.classId}`).then((res) => res);
 
     await waitUntilBlocked();
     await transaction.commit();
@@ -268,7 +273,7 @@ describe('a delete waits for a file that is being attached, then removes it too'
   });
 
   it('a homework delete and a submission being saved', async () => {
-    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.noUnit}`)).body.homework.id;
+    const homeworkId = (await api(teacher).get(`/api/v1/lessons/${fixture.inFirstUnit}?classId=${fixture.classId}`)).body.homework.id;
     const { transaction, files } = await holdOpen(async (t) => {
       const { pages } = await addSubmission({
         homeworkId,
@@ -279,7 +284,7 @@ describe('a delete waits for a file that is being attached, then removes it too'
       });
       return pages;
     });
-    const deleting = api(teacher).delete(`/api/v1/lessons/${fixture.noUnit}/homework`).then((res) => res);
+    const deleting = api(teacher).delete(`/api/v1/lessons/${fixture.inFirstUnit}/homework?classId=${fixture.classId}`).then((res) => res);
 
     await waitUntilBlocked();
     await transaction.commit();

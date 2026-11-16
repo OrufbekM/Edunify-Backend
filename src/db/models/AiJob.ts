@@ -14,6 +14,8 @@ import { JOB_STATUSES, type JobStatus } from './enums.js';
 export class AiJob extends Model<InferAttributes<AiJob>, InferCreationAttributes<AiJob>> {
   declare id: CreationOptional<string>;
   declare lessonId: string;
+  // Jobs are per lesson and class: a linked lesson's classes grade apart (contract 8.11).
+  declare classId: string;
   declare createdBy: string;
   declare status: JobStatus;
   declare submissionIds: string[];
@@ -36,6 +38,7 @@ AiJob.init(
       defaultValue: Sequelize.literal('gen_random_uuid()'),
     },
     lessonId: { type: DataTypes.UUID, allowNull: false },
+    classId: { type: DataTypes.UUID, allowNull: false },
     createdBy: { type: DataTypes.UUID, allowNull: false },
     status: { type: DataTypes.ENUM(...JOB_STATUSES), allowNull: false },
     submissionIds: { type: DataTypes.ARRAY(DataTypes.UUID), allowNull: false },

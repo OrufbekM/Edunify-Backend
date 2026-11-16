@@ -1,7 +1,7 @@
 import { Router, type Request, type RequestHandler, type Response } from 'express';
 
 import type { HomeworkType } from '../../db/models/enums.js';
-import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
+import { classQuerySchema, emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
@@ -61,12 +61,13 @@ submissionsRouter.post(
   studentOnly,
   async (req, res) => {
     const { homeworkId } = homeworkParams.parse(req.params);
+    const { classId } = classQuerySchema.parse(req.query);
     const userId = getAuth(req).id;
     // Access and the homework type are settled before multer reads a byte (plan, Phase 8).
-    const type = await submissions.assertCanSubmit(userId, homeworkId);
+    const type = await submissions.assertCanSubmit(userId, classId, homeworkId);
     const content = await readContent(type, req, res);
 
-    res.status(201).json(await submissions.createSubmission(userId, homeworkId, content));
+    res.status(201).json(await submissions.createSubmission(userId, classId, homeworkId, content));
   },
 );
 
