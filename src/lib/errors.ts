@@ -19,6 +19,8 @@ const ERRORS = {
   INVALID_STATUS_TRANSITION: { status: 409, message: 'The requested account status change is not allowed' },
   STUDENT_ID_IN_USE: { status: 409, message: 'That account already has a row in this class' },
   HOMEWORK_TYPE_LOCKED: { status: 409, message: 'Type cannot change once submissions exist' },
+  CLASS_IN_OTHER_GROUP: { status: 409, message: 'A class in linkedClassIds already belongs to another group' },
+  UNIT_NOT_EMPTY: { status: 409, message: 'A unit of a group can be deleted only when no class has a lesson in it' },
   SUBMISSION_NOT_LATEST: { status: 409, message: 'Only the latest version can be graded' },
   AI_JOB_ACTIVE: { status: 409, message: 'A job for this lesson is already running' },
   LIMIT_REACHED: { status: 409, message: 'A cap from contract section 2.7 was hit' },

@@ -8,7 +8,8 @@ export function useTestDatabase(): void {
   assertTestDatabase(env.DATABASE_URL);
 
   beforeEach(async () => {
-    await sequelize.query('TRUNCATE TABLE users CASCADE');
+    // Everything hangs off users except class groups, which classes point at.
+    await sequelize.query('TRUNCATE TABLE users, class_groups CASCADE');
   });
 
   afterAll(async () => {

@@ -11,22 +11,41 @@ import type { Upload } from '../../middleware/upload.js';
 import { storage } from '../../storage/index.js';
 import { StorageNotFoundError } from '../../storage/provider.js';
 
-// Call inside the transaction, then pass the returned keys to removeStoredFiles once it has
-// committed. Not a transaction.afterCommit hook: Sequelize also runs those when COMMIT fails,
-// which would delete the stored bytes of rows that still exist.
+// Call inside the transaction, after deleting or changing the rows that pointed at these
+// files, then pass the returned keys to removeStoredFiles once it has committed. Not a
+// transaction.afterCommit hook: Sequelize also runs those when COMMIT fails, which would
+// delete the stored bytes of rows that still exist.
+//
+// A file that some row still references stays: copies of a lesson share its lesson file
+// and its homework's instructions file (contract 4.1). The rows are locked first, in id
+// order, so two deletes of the last two references can't both see the other one still there,
+// and nothing can take a new reference while the check runs.
 export async function deleteFileRows(
   fileIds: string[],
   transaction: Transaction,
 ): Promise<string[]> {
-  const files = await FileRecord.findAll({
-    attributes: ['storageKey'],
-    where: { id: fileIds },
+  const ids = [...new Set(fileIds)];
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  await sequelize.query('SELECT id FROM files WHERE id = ANY($ids::uuid[]) ORDER BY id FOR UPDATE', {
+    bind: { ids },
     transaction,
   });
 
-  await FileRecord.destroy({ where: { id: fileIds }, transaction });
+  const removed = await sequelize.query<{ storageKey: string }>(
+    `DELETE FROM files f
+      WHERE f.id = ANY($ids::uuid[])
+        AND NOT EXISTS (SELECT 1 FROM lessons l WHERE l.lesson_file_id = f.id)
+        AND NOT EXISTS (SELECT 1 FROM homeworks h WHERE h.instructions_file_id = f.id)
+        AND NOT EXISTS (SELECT 1 FROM submission_pages sp WHERE sp.file_id = f.id)
+      RETURNING f.storage_key AS "storageKey"`,
+    { bind: { ids }, type: QueryTypes.SELECT, transaction },
+  );
 
-  return files.map((file) => file.storageKey);
+  return removed.map((file) => file.storageKey);
 }
 
 export async function removeStoredFiles(storageKeys: string[]): Promise<void> {
@@ -93,21 +112,30 @@ function present(id: string | null): id is string {
   return id !== null;
 }
 
-// Pages of submissions to these homeworks, or by this roster row. The caller holds a lock
-// that keeps new submissions out: FOR UPDATE on the homework or class_students rows, which
-// a new submission's foreign keys need KEY SHARE on.
+// Pages of submissions to these homeworks (from one class's roster when `classId` is given),
+// by this roster row, or by every roster row of a class. The caller holds a lock that keeps
+// new submissions out: FOR UPDATE on the homework or class_students rows, which a new
+// submission's foreign keys need KEY SHARE on.
 export async function pageFileIds(
-  scope: { homeworkIds: string[] } | { classStudentId: string },
+  scope:
+    | { homeworkIds: string[]; classId?: string }
+    | { classStudentId: string }
+    | { rosterOf: string },
   transaction: Transaction,
 ): Promise<string[]> {
   if ('homeworkIds' in scope && scope.homeworkIds.length === 0) {
     return [];
   }
 
+  const inClass = 's.class_student_id IN (SELECT cs.id FROM class_students cs WHERE cs.class_id = $classId)';
   const [condition, bind] =
     'homeworkIds' in scope
-      ? ['s.homework_id = ANY($ids::uuid[])', { ids: scope.homeworkIds }]
-      : ['s.class_student_id = $id', { id: scope.classStudentId }];
+      ? scope.classId
+        ? [`s.homework_id = ANY($ids::uuid[]) AND ${inClass}`, { ids: scope.homeworkIds, classId: scope.classId }]
+        : ['s.homework_id = ANY($ids::uuid[])', { ids: scope.homeworkIds }]
+      : 'classStudentId' in scope
+        ? ['s.class_student_id = $id', { id: scope.classStudentId }]
+        : [inClass, { classId: scope.rosterOf }];
   const rows = await sequelize.query<{ fileId: string }>(
     `SELECT sp.file_id AS "fileId"
        FROM submission_pages sp
@@ -119,7 +147,11 @@ export async function pageFileIds(
   return rows.map((row) => row.fileId);
 }
 
-export type LessonScope = { classId: string } | { unitId: string } | { lessonId: string };
+export type LessonScope =
+  | { classId: string }
+  | { unitId: string }
+  | { lessonId: string }
+  | { lessonIds: string[] };
 
 // Every file under the lessons in scope: lesson files, homework instructions and submitted
 // pages. Locks those lessons and their homework FOR UPDATE first, so nothing can attach a
@@ -129,15 +161,17 @@ export async function lockLessonFiles(
   scope: LessonScope,
   transaction: Transaction,
 ): Promise<string[]> {
-  const [column, value] =
+  const [condition, value] =
     'classId' in scope
-      ? ['class_id', scope.classId]
+      ? ['class_id = $value', scope.classId]
       : 'unitId' in scope
-        ? ['unit_id', scope.unitId]
-        : ['id', scope.lessonId];
+        ? ['unit_id = $value', scope.unitId]
+        : 'lessonId' in scope
+          ? ['id = $value', scope.lessonId]
+          : ['id = ANY($value::uuid[])', scope.lessonIds];
   const lessons = await sequelize.query<{ id: string; fileId: string | null }>(
     `SELECT id, lesson_file_id AS "fileId" FROM lessons
-      WHERE ${column} = $value
+      WHERE ${condition}
       ORDER BY id
         FOR UPDATE`,
     { bind: { value }, type: QueryTypes.SELECT, transaction },
@@ -163,6 +197,36 @@ export async function lockLessonFiles(
     ...lessons.map((lesson) => lesson.fileId).filter(present),
     ...homeworks.map((homework) => homework.fileId).filter(present),
     ...pages,
+  ];
+}
+
+// For deleting a class (contract 4 and 4.1): locks every lesson the class holds, linked ones
+// included, and their homework, FOR UPDATE in id order, so no new submission or file can
+// attach to them. Returns the files that go with the class: those of its own (class-only)
+// lessons and the pages its roster handed in. Files of linked lessons stay with the group.
+export async function lockClassFiles(classId: string, transaction: Transaction): Promise<string[]> {
+  const lessons = await sequelize.query<{ id: string; fileId: string | null; own: boolean }>(
+    `SELECT l.id, l.lesson_file_id AS "fileId", l.class_id IS NOT NULL AS own
+       FROM lessons l
+      WHERE l.class_id = $classId
+         OR l.id IN (SELECT cl.lesson_id FROM class_lessons cl WHERE cl.class_id = $classId)
+      ORDER BY l.id
+        FOR UPDATE OF l`,
+    { bind: { classId }, type: QueryTypes.SELECT, transaction },
+  );
+  const homeworks = await sequelize.query<{ fileId: string | null; lessonId: string }>(
+    `SELECT instructions_file_id AS "fileId", lesson_id AS "lessonId" FROM homeworks
+      WHERE lesson_id = ANY($lessonIds::uuid[])
+      ORDER BY id
+        FOR UPDATE`,
+    { bind: { lessonIds: lessons.map((lesson) => lesson.id) }, type: QueryTypes.SELECT, transaction },
+  );
+  const own = new Set(lessons.filter((lesson) => lesson.own).map((lesson) => lesson.id));
+
+  return [
+    ...lessons.filter((lesson) => lesson.own).map((lesson) => lesson.fileId).filter(present),
+    ...homeworks.filter((homework) => own.has(homework.lessonId)).map((homework) => homework.fileId).filter(present),
+    ...(await pageFileIds({ rosterOf: classId }, transaction)),
   ];
 }
 

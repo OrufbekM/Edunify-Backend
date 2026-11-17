@@ -406,7 +406,8 @@ describe('PATCH /classes/:id', () => {
     ['a blank name', { name: ' ' }],
     ['a null categoryId', { categoryId: null }],
     ['the old subject', { subject: 'Physics' }],
-    ['linkedClassIds, which comes with class groups', { linkedClassIds: [] }],
+    ['linkedClassIds that is not a list', { linkedClassIds: 'all' }],
+    ['a malformed id in linkedClassIds', { linkedClassIds: ['nope'] }],
     ['an unknown field', { publicId: 'aaaaaaaa' }],
   ])('gives VALIDATION_ERROR for %s', async (_case, body) => {
     const { id } = await createClass(teacher, categoryId);

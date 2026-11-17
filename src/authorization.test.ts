@@ -149,6 +149,12 @@ const MATRIX: Record<string, Case> = {
     ok: [['owner', 200]],
     send: (u, f) => call('patch', `${V1}/classes/${f.classId}`, u, { name: 'Geometry' }),
   },
+  'POST /api/v1/classes/:id/linked-classes/preview': {
+    role: 'teacher',
+    resource: 'classId',
+    ok: [['owner', 200]],
+    send: (u, f) => call('post', `${V1}/classes/${f.classId}/linked-classes/preview`, u, { linkedClassIds: [] }),
+  },
   'DELETE /api/v1/classes/:id': {
     role: 'teacher',
     resource: 'classId',

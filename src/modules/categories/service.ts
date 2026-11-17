@@ -148,10 +148,14 @@ export async function updateCategory(
   }
 }
 
-// PostgreSQL reports a RESTRICT violation as 23001, which Sequelize leaves as a plain
-// DatabaseError: it maps only 23503 to ForeignKeyConstraintError.
+// PostgreSQL 18 reports a RESTRICT violation as 23001, but 17 (production and CI, contract
+// 1.2) still reports 23503. Sequelize leaves 23001 a plain DatabaseError and maps 23503 to
+// ForeignKeyConstraintError, a DatabaseError too. classes.category_id is the only key that
+// points at categories, so either code means the category still has classes.
+const RESTRICT_VIOLATION_CODES: ReadonlySet<string | undefined> = new Set(['23001', '23503']);
+
 function isRestrictViolation(err: unknown): boolean {
-  return err instanceof DatabaseError && (err.parent as { code?: string }).code === '23001';
+  return err instanceof DatabaseError && RESTRICT_VIOLATION_CODES.has((err.parent as { code?: string }).code);
 }
 
 // The categories after it move up one, so the order stays dense (contract 4).

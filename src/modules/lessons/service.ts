@@ -3,19 +3,22 @@ import { QueryTypes, Transaction } from 'sequelize';
 import { sequelize } from '../../db/index.js';
 import type { HomeworkType, Role } from '../../db/models/enums.js';
 import {
+  AiJob,
   ClassLesson,
   ClassUnit,
   FileRecord,
   Homework,
   Lesson,
+  SchoolClass,
   Submission,
   Unit,
 } from '../../db/models/index.js';
+import { LESSON_CAP, UNIT_CAP } from '../../lib/caps.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
-import { orderOutOfRange, placeAt } from '../../lib/positions.js';
+import { orderOutOfRange, placeAt, writePositions } from '../../lib/positions.js';
 import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
 import type { Upload } from '../../middleware/upload.js';
-import { getOwnClass, lockOwnClass } from '../classes/service.js';
+import { getOwnClass, lockClassContent } from '../classes/service.js';
 import {
   createFileRecord,
   deleteFileRows,
@@ -27,21 +30,18 @@ import {
 import { getConnectedClassStudent } from '../students/service.js';
 import { newSubmissionCountsByLesson } from '../submissions/counts.js';
 import { latestSubmissionOf, type SubmissionDto } from '../submissions/service.js';
+import { copyLessonsFor, deleteOrphanLessons, renumberLinked } from './copies.js';
 import {
   assertVisibleToStudent,
   buildOutline,
   findPlacement,
   lessonsOfUnit,
+  normalizeSlots,
   writeSlots,
   writeUnitOrder,
   type ClassOutline,
   type OutlineLesson,
 } from './placements.js';
-
-// Contract 2.7: a group's units and linked lessons count in every class that holds them,
-// which counting placements does.
-const UNIT_CAP = 100;
-const LESSON_CAP = 500;
 
 export interface Viewer {
   id: string;
@@ -115,7 +115,7 @@ function unknownUnit(): AppError {
   return new AppError('VALIDATION_ERROR', 'Unknown unit', [{ path: 'unitId', message: 'Unknown unit' }]);
 }
 
-// Linked lessons need a class group (contract 8.6); groups arrive in plan Phase 17.
+// Linked lessons need a class group (contract 8.6).
 function needsGroup(): AppError {
   return new AppError('VALIDATION_ERROR', 'The class is not linked with other classes', [
     { path: 'linked', message: 'Only a class in a group can have linked lessons' },
@@ -189,26 +189,58 @@ async function assertCanView(viewer: Viewer, classId: string, transaction?: Tran
   }
 }
 
-// Every write to a class's content holds its class lock, so moves that race still leave
-// positions dense. A class that isn't the teacher's answers like a missing unit or lesson.
-async function lockClassFor(
+// What a content write holds (plan, rules: locking): the class, and in a group every class
+// of the group, so moves that race still leave positions dense. `classIds` are the classes
+// a group-wide change reaches: the group's, or the class alone.
+interface Locked {
+  schoolClass: SchoolClass;
+  classIds: string[];
+}
+
+// A class that isn't the teacher's answers like a missing unit or lesson.
+async function lockContent(
   teacherId: string,
   classId: string,
   notFound: () => AppError,
   transaction: Transaction,
-): Promise<void> {
-  await notFoundAs(lockOwnClass(teacherId, classId, transaction), notFound);
+): Promise<Locked> {
+  return notFoundAs(lockClassContent(teacherId, classId, transaction), notFound);
 }
 
-// The unit, placed in the teacher's own class (contract 8.6).
+// Contract 2.7: creating or linking an item may not push any class over a cap. In a group
+// LIMIT_REACHED names the classes that would go over (`details.classIds`).
+async function assertRoom(
+  kind: 'units' | 'lessons',
+  classIds: string[],
+  grouped: boolean,
+  transaction: Transaction,
+): Promise<void> {
+  if (classIds.length === 0) {
+    return;
+  }
+
+  const cap = kind === 'units' ? UNIT_CAP : LESSON_CAP;
+  const where = { classId: classIds };
+  const rows =
+    kind === 'units'
+      ? await ClassUnit.count({ where, group: ['classId'], transaction })
+      : await ClassLesson.count({ where, group: ['classId'], transaction });
+  const counts = new Map(rows.map((row) => [String(row.classId), row.count]));
+  const over = classIds.filter((id) => (counts.get(id) ?? 0) >= cap);
+
+  if (over.length > 0) {
+    throw new AppError('LIMIT_REACHED', `A class has at most ${cap} ${kind}`, grouped ? { classIds: over } : undefined);
+  }
+}
+
+// The unit, placed in the teacher's own class (contract 8.6), with the content lock held.
 async function ownPlacedUnit(
   teacherId: string,
   classId: string,
   unitId: string,
   transaction: Transaction,
-): Promise<{ unit: Unit; placement: ClassUnit }> {
-  await lockClassFor(teacherId, classId, unitNotFound, transaction);
-
+): Promise<{ unit: Unit; placement: ClassUnit; locked: Locked }> {
+  const locked = await lockContent(teacherId, classId, unitNotFound, transaction);
   const placement = await ClassUnit.findOne({ where: { classId, unitId }, transaction });
   const unit = placement && (await Unit.findByPk(unitId, { transaction }));
 
@@ -216,23 +248,17 @@ async function ownPlacedUnit(
     throw unitNotFound();
   }
 
-  return { unit, placement };
+  return { unit, placement, locked };
 }
 
-// The lesson, placed in the teacher's own class (contract 8.6). With `lock`, the class lock
-// is taken first, for writes that change the class's content.
+// The lesson, placed in the teacher's own class (contract 8.6).
 async function ownPlacedLesson(
   teacherId: string,
   classId: string,
   lessonId: string,
   transaction?: Transaction,
-  { lock = false }: { lock?: boolean } = {},
 ): Promise<{ lesson: Lesson; placement: ClassLesson }> {
-  if (lock && transaction) {
-    await lockClassFor(teacherId, classId, lessonNotFound, transaction);
-  } else {
-    await notFoundAs(getOwnClass(teacherId, classId, transaction), lessonNotFound);
-  }
+  await notFoundAs(getOwnClass(teacherId, classId, transaction), lessonNotFound);
 
   const placement = await findPlacement(classId, lessonId, transaction);
   const lesson = placement && (await Lesson.findByPk(lessonId, { transaction }));
@@ -244,8 +270,57 @@ async function ownPlacedLesson(
   return { lesson, placement };
 }
 
+// The same, for writes that change the class's content: the content lock first.
+async function lockPlacedLesson(
+  teacherId: string,
+  classId: string,
+  lessonId: string,
+  transaction: Transaction,
+): Promise<{ lesson: Lesson; placement: ClassLesson; locked: Locked }> {
+  const locked = await lockContent(teacherId, classId, lessonNotFound, transaction);
+  const placed = await ownPlacedLesson(teacherId, classId, lessonId, transaction);
+
+  return { ...placed, locked };
+}
+
 function unitIdsOf(outline: ClassOutline): string[] {
   return outline.units.map((unit) => unit.id);
+}
+
+// The group's linked lessons in a unit, in linked order.
+async function linkedOrderOf(groupId: string, unitId: string, transaction: Transaction): Promise<string[]> {
+  const lessons = await Lesson.findAll({
+    attributes: ['id'],
+    where: { groupId, unitId },
+    order: [
+      ['position', 'ASC'],
+      ['id', 'ASC'],
+    ],
+    transaction,
+  });
+
+  return lessons.map((lesson) => lesson.id);
+}
+
+// Where a linked lesson goes in its unit's linked order (contract 4.1, "Lesson order inside
+// a unit"): right after the linked lesson that comes before it in this class's list, or
+// first if none does. `list` is this class's list for the unit with the lesson in place.
+async function placeLinked(
+  groupId: string,
+  unitId: string,
+  lessonId: string,
+  list: OutlineLesson[],
+  transaction: Transaction,
+): Promise<void> {
+  const index = list.findIndex((entry) => entry.id === lessonId);
+  const before = list
+    .slice(0, index)
+    .filter((entry) => entry.linked)
+    .at(-1);
+  const order = (await linkedOrderOf(groupId, unitId, transaction)).filter((id) => id !== lessonId);
+  const at = before ? order.indexOf(before.id) + 1 : 0;
+
+  await writePositions('lessons', [...order.slice(0, at), lessonId, ...order.slice(at)], transaction);
 }
 
 // Units in order, then lessons in outline order, each with its number (contract 8.6).
@@ -288,24 +363,28 @@ export async function getOutline(viewer: Viewer, classId: string): Promise<Outli
   );
 }
 
-// Appended last (contract 8.6).
+// Appended last (contract 8.6). In a group the unit is the group's, appended last in every
+// class of the group.
 export async function createUnit(teacherId: string, classId: string, input: { title: string }): Promise<UnitDto> {
   return sequelize.transaction(async (transaction) => {
-    await lockOwnClass(teacherId, classId, transaction);
+    const { schoolClass, classIds } = await lockClassContent(teacherId, classId, transaction);
+    const groupId = schoolClass.groupId;
+
+    await assertRoom('units', classIds, groupId !== null, transaction);
 
     const count = await ClassUnit.count({ where: { classId }, transaction });
-
-    if (count >= UNIT_CAP) {
-      throw new AppError('LIMIT_REACHED', `A class has at most ${UNIT_CAP} units`);
-    }
-
-    const unit = await Unit.create({ classId, groupId: null, title: input.title }, { transaction });
-    await ClassUnit.create({ classId, unitId: unit.id, position: count }, { transaction });
+    const unit = await Unit.create({ classId: groupId ? null : classId, groupId, title: input.title }, { transaction });
+    await ClassUnit.bulkCreate(
+      classIds.map((id) => ({ classId: id, unitId: unit.id, position: count })),
+      { transaction },
+    );
 
     return { id: unit.id, classId, title: unit.title, order: count };
   });
 }
 
+// In a group the title and the order change in every class (contract 8.6): the unit row is
+// shared, and every class gets the same order.
 export async function updateUnit(
   teacherId: string,
   classId: string,
@@ -313,7 +392,7 @@ export async function updateUnit(
   input: { title?: string; order?: number },
 ): Promise<UnitDto> {
   return sequelize.transaction(async (transaction) => {
-    const { unit, placement } = await ownPlacedUnit(teacherId, classId, unitId, transaction);
+    const { unit, placement, locked } = await ownPlacedUnit(teacherId, classId, unitId, transaction);
 
     if (input.order !== undefined) {
       const ids = unitIdsOf(await buildOutline(classId, transaction));
@@ -322,7 +401,10 @@ export async function updateUnit(
         throw orderOutOfRange(ids.length - 1);
       }
 
-      await writeUnitOrder(classId, placeAt(ids, unitId, input.order), transaction);
+      const order = placeAt(ids, unitId, input.order);
+      for (const id of locked.classIds) {
+        await writeUnitOrder(id, order, transaction);
+      }
       await placement.reload({ transaction });
     }
 
@@ -335,25 +417,32 @@ export async function updateUnit(
   });
 }
 
-// A class keeps at least one unit (contract 8.6). The unit goes with its lessons, their
-// homework and submissions; their files go once the transaction has committed.
+// Every class keeps at least one unit (contract 8.6). Outside a group the unit goes with
+// its lessons, their homework and submissions, and their files once the transaction has
+// committed. A group's unit goes from every class, and only once no class has a lesson in it.
 export async function deleteUnit(teacherId: string, classId: string, unitId: string): Promise<void> {
   const storageKeys = await sequelize.transaction(async (transaction) => {
-    const { unit } = await ownPlacedUnit(teacherId, classId, unitId, transaction);
+    const { unit, locked } = await ownPlacedUnit(teacherId, classId, unitId, transaction);
     const ids = unitIdsOf(await buildOutline(classId, transaction));
 
     if (ids.length <= 1) {
-      throw new AppError('LAST_UNIT', 'A class must keep at least one unit', { classIds: [classId] });
+      throw new AppError('LAST_UNIT', 'A class must keep at least one unit', { classIds: locked.classIds });
     }
 
-    const fileIds = await lockLessonFiles({ unitId }, transaction);
+    if (unit.groupId && (await Lesson.count({ where: { unitId }, transaction })) > 0) {
+      throw new AppError('UNIT_NOT_EMPTY');
+    }
+
+    const fileIds = unit.groupId ? [] : await lockLessonFiles({ unitId }, transaction);
 
     await unit.destroy({ transaction });
-    await writeUnitOrder(
-      classId,
-      ids.filter((id) => id !== unitId),
-      transaction,
-    );
+    for (const id of locked.classIds) {
+      await writeUnitOrder(
+        id,
+        ids.filter((other) => other !== unitId),
+        transaction,
+      );
+    }
 
     return deleteFileRows(fileIds, transaction);
   });
@@ -361,27 +450,48 @@ export async function deleteUnit(teacherId: string, classId: string, unitId: str
   await removeStoredFiles(storageKeys);
 }
 
-// Appended last in its unit, visible (contract 8.6).
+// Appended last in its unit, visible (contract 8.6). `linked: true` needs a group: the
+// lesson is the group's, last in the unit's linked order, and every other class of the group
+// gets it too, hidden.
 export async function createLesson(
   teacherId: string,
   classId: string,
   input: { title: string; unitId: string; linked?: boolean },
 ): Promise<LessonDetailDto> {
   return sequelize.transaction(async (transaction) => {
-    const schoolClass = await lockOwnClass(teacherId, classId, transaction);
+    const { schoolClass, classIds } = await lockClassContent(teacherId, classId, transaction);
+    const groupId = schoolClass.groupId;
 
-    if (input.linked && schoolClass.groupId === null) {
+    if (input.linked && groupId === null) {
       throw needsGroup();
     }
 
-    if ((await ClassLesson.count({ where: { classId }, transaction })) >= LESSON_CAP) {
-      throw new AppError('LIMIT_REACHED', `A class has at most ${LESSON_CAP} lessons`);
-    }
+    await assertRoom('lessons', input.linked ? classIds : [classId], groupId !== null, transaction);
 
     const outline = await buildOutline(classId, transaction);
 
     if (!outline.units.some((unit) => unit.id === input.unitId)) {
       throw unknownUnit();
+    }
+
+    if (input.linked && groupId) {
+      const lesson = await Lesson.create(
+        {
+          classId: null,
+          groupId,
+          unitId: input.unitId,
+          title: input.title,
+          position: (await linkedOrderOf(groupId, input.unitId, transaction)).length,
+          lessonFileId: null,
+        },
+        { transaction },
+      );
+      await ClassLesson.bulkCreate(
+        classIds.map((id) => ({ classId: id, lessonId: lesson.id, position: null, visible: id === classId })),
+        { transaction },
+      );
+
+      return lessonDetail(classId, lesson, 'teacher', transaction);
     }
 
     const lesson = await Lesson.create(
@@ -397,71 +507,201 @@ export async function createLesson(
   });
 }
 
-// `unitId` moves the lesson to another unit of the class; a move without `order` appends it
-// last. `order` is the target index in this class's list of the unit it ends up in (contract
-// 8.6). Every lesson is class-only until class groups arrive (plan Phase 17), so a move
-// changes this class only. `visible` is this class only.
+// linked: true on a class-only lesson (contract 8.6). It keeps its place in this class's
+// list: its slot goes, and it joins the linked order right after the linked lesson before
+// it. Every other class of the group gets it, hidden. The slots are made the indices first,
+// which is what keeps the place.
+async function linkLesson(
+  lesson: Lesson,
+  placement: ClassLesson,
+  locked: Locked,
+  transaction: Transaction,
+): Promise<void> {
+  const classId = locked.schoolClass.id;
+  const groupId = locked.schoolClass.groupId as string;
+  const others = locked.classIds.filter((id) => id !== classId);
+
+  await assertRoom('lessons', others, true, transaction);
+  await normalizeSlots([classId], [lesson.unitId], transaction);
+
+  const list = lessonsOfUnit(await buildOutline(classId, transaction), lesson.unitId);
+  // Placed last for now: the linked order is written right after.
+  await lesson.update({ classId: null, groupId, position: list.length }, { transaction });
+  await placement.update({ position: null }, { transaction });
+  await placeLinked(
+    groupId,
+    lesson.unitId,
+    lesson.id,
+    list.map((entry) => (entry.id === lesson.id ? { ...entry, linked: true } : entry)),
+    transaction,
+  );
+  await ClassLesson.bulkCreate(
+    others.map((id) => ({ classId: id, lessonId: lesson.id, position: null, visible: false })),
+    { transaction },
+  );
+  await normalizeSlots(locked.classIds, [lesson.unitId], transaction);
+}
+
+// linked: false on a linked lesson (contract 8.6): a class-only copy in this class at the
+// same place, with this class's submissions and AI jobs moved to it. The original stays in
+// the other classes, or goes if no class holds it any more. Returns the copy, and files that
+// may have lost their last reference.
+async function unlinkLesson(
+  lesson: Lesson,
+  locked: Locked,
+  transaction: Transaction,
+): Promise<{ lesson: Lesson; placement: ClassLesson; fileIds: string[] }> {
+  const classId = locked.schoolClass.id;
+  const entry = placed(await buildOutline(classId, transaction), lesson.id);
+  const copies = await copyLessonsFor(classId, [{ lessonId: lesson.id, slot: entry.order }], new Map(), transaction);
+  const copyId = copies.get(lesson.id) as string;
+  const fileIds = await deleteOrphanLessons(lesson.groupId as string, transaction);
+
+  await normalizeSlots([classId], [lesson.unitId], transaction);
+
+  return {
+    lesson: (await Lesson.findByPk(copyId, { transaction })) as Lesson,
+    placement: (await findPlacement(classId, copyId, transaction)) as ClassLesson,
+    fileIds,
+  };
+}
+
+// A linked lesson moves in every class (contract 4.1): to its new unit everywhere, and in
+// the linked order right after the linked lesson that comes before it in this class's list.
+// A class-only lesson moves in this class only, by its slot.
+async function moveLesson(
+  lesson: Lesson,
+  locked: Locked,
+  input: { unitId?: string; order?: number },
+  transaction: Transaction,
+): Promise<void> {
+  const classId = locked.schoolClass.id;
+  const fromUnitId = lesson.unitId;
+  const toUnitId = input.unitId ?? fromUnitId;
+  const outline = await buildOutline(classId, transaction);
+
+  if (!outline.units.some((unit) => unit.id === toUnitId)) {
+    throw unknownUnit();
+  }
+
+  const target = lessonsOfUnit(outline, toUnitId).filter((entry) => entry.id !== lesson.id);
+  const order = input.order ?? target.length;
+
+  if (order > target.length) {
+    throw orderOutOfRange(target.length);
+  }
+
+  const self = placed(outline, lesson.id);
+  const list = [...target.slice(0, order), { ...self, unitId: toUnitId }, ...target.slice(order)];
+
+  if (toUnitId !== fromUnitId) {
+    await lesson.update({ unitId: toUnitId }, { transaction });
+  }
+
+  if (lesson.groupId) {
+    await placeLinked(lesson.groupId, toUnitId, lesson.id, list, transaction);
+
+    if (toUnitId !== fromUnitId) {
+      await renumberLinked(lesson.groupId, fromUnitId, transaction);
+    }
+
+    await normalizeSlots(locked.classIds, [fromUnitId, toUnitId], transaction);
+    return;
+  }
+
+  await writeSlots(
+    classId,
+    list.map((entry) => entry.id),
+    transaction,
+  );
+
+  if (toUnitId !== fromUnitId) {
+    await writeSlots(
+      classId,
+      lessonsOfUnit(outline, fromUnitId)
+        .map((entry) => entry.id)
+        .filter((id) => id !== lesson.id),
+      transaction,
+    );
+  }
+}
+
+// `linked` first, so the other changes apply to what the lesson has become: a title change
+// on a linked lesson reaches every class, on the copy only this one. `unitId` and `order`
+// follow contract 8.6; `visible` is this class only.
 export async function updateLesson(
   teacherId: string,
   classId: string,
   lessonId: string,
   input: { title?: string; unitId?: string; order?: number; linked?: boolean; visible?: boolean },
 ): Promise<LessonDetailDto> {
-  return sequelize.transaction(async (transaction) => {
-    const { lesson, placement } = await ownPlacedLesson(teacherId, classId, lessonId, transaction, { lock: true });
+  const { detail, storageKeys } = await sequelize.transaction(async (transaction) => {
+    const owned = await lockPlacedLesson(teacherId, classId, lessonId, transaction);
+    const { locked } = owned;
+    let { lesson, placement } = owned;
+    let fileIds: string[] = [];
 
     if (input.linked === true && lesson.groupId === null) {
-      throw needsGroup();
+      if (locked.schoolClass.groupId === null) {
+        throw needsGroup();
+      }
+
+      await linkLesson(lesson, placement, locked, transaction);
+    } else if (input.linked === false && lesson.groupId !== null) {
+      ({ lesson, placement, fileIds } = await unlinkLesson(lesson, locked, transaction));
     }
 
-    const fromUnitId = lesson.unitId;
-    const toUnitId = input.unitId ?? fromUnitId;
-
-    if (toUnitId !== fromUnitId || input.order !== undefined) {
-      const outline = await buildOutline(classId, transaction);
-
-      if (!outline.units.some((unit) => unit.id === toUnitId)) {
-        throw unknownUnit();
-      }
-
-      const target = lessonsOfUnit(outline, toUnitId)
-        .map((entry) => entry.id)
-        .filter((id) => id !== lessonId);
-      const order = input.order ?? target.length;
-
-      if (order > target.length) {
-        throw orderOutOfRange(target.length);
-      }
-
-      lesson.unitId = toUnitId;
-      await lesson.save({ transaction });
-      await writeSlots(classId, placeAt(target, lessonId, order), transaction);
-
-      if (toUnitId !== fromUnitId) {
-        const source = lessonsOfUnit(outline, fromUnitId)
-          .map((entry) => entry.id)
-          .filter((id) => id !== lessonId);
-        await writeSlots(classId, source, transaction);
-      }
+    if (input.unitId !== undefined || input.order !== undefined) {
+      await moveLesson(lesson, locked, input, transaction);
     }
 
     if (input.title !== undefined) {
-      lesson.title = input.title;
-      await lesson.save({ transaction });
+      await lesson.update({ title: input.title }, { transaction });
     }
 
     if (input.visible !== undefined) {
-      placement.visible = input.visible;
-      await placement.save({ transaction });
+      await placement.update({ visible: input.visible }, { transaction });
     }
 
-    return lessonDetail(classId, lesson, 'teacher', transaction);
+    await lesson.reload({ transaction });
+
+    return {
+      detail: await lessonDetail(classId, lesson, 'teacher', transaction),
+      storageKeys: await deleteFileRows(fileIds, transaction),
+    };
   });
+
+  await removeStoredFiles(storageKeys);
+  return detail;
 }
 
-// scope=class removes the lesson from this class: a class-only lesson is deleted, with its
-// homework and submissions. scope=all is for a linked lesson only (contract 8.6). The files
-// go once the transaction has committed.
+// A linked lesson leaves one class (contract 8.6, scope=class): the placement goes, with
+// the class's submissions for its homework and its AI jobs for it. The lesson and its
+// homework are locked FOR UPDATE first, so no new submission lands meanwhile.
+async function removeFromClass(lesson: Lesson, classId: string, transaction: Transaction): Promise<string[]> {
+  await Lesson.findByPk(lesson.id, { lock: Transaction.LOCK.UPDATE, transaction });
+
+  const homework = await Homework.findOne({ where: { lessonId: lesson.id }, lock: Transaction.LOCK.UPDATE, transaction });
+  const fileIds = homework ? await pageFileIds({ homeworkIds: [homework.id], classId }, transaction) : [];
+
+  if (homework) {
+    await sequelize.query(
+      `DELETE FROM submissions s USING class_students cs
+        WHERE s.homework_id = $homeworkId AND cs.id = s.class_student_id AND cs.class_id = $classId`,
+      { bind: { homeworkId: homework.id, classId }, transaction },
+    );
+  }
+
+  await AiJob.destroy({ where: { lessonId: lesson.id, classId }, transaction });
+  await ClassLesson.destroy({ where: { classId, lessonId: lesson.id }, transaction });
+
+  return [...fileIds, ...(await deleteOrphanLessons(lesson.groupId as string, transaction))];
+}
+
+// scope=class (the default) removes the lesson from this class: a class-only lesson is
+// deleted, a linked one leaves this class only. scope=all deletes a linked lesson from every
+// class (contract 8.6). Homework and submissions go with it where it goes; files once the
+// transaction has committed, and only those nothing else references.
 export async function deleteLesson(
   teacherId: string,
   classId: string,
@@ -469,25 +709,30 @@ export async function deleteLesson(
   scope: 'class' | 'all',
 ): Promise<void> {
   const storageKeys = await sequelize.transaction(async (transaction) => {
-    const { lesson } = await ownPlacedLesson(teacherId, classId, lessonId, transaction, { lock: true });
+    const { lesson, locked } = await lockPlacedLesson(teacherId, classId, lessonId, transaction);
+    const { groupId, unitId } = lesson;
 
-    if (scope === 'all' && lesson.groupId === null) {
+    if (scope === 'all' && groupId === null) {
       throw new AppError('VALIDATION_ERROR', 'Only a linked lesson can be deleted from every class', [
         { path: 'scope', message: 'Only a linked lesson can be deleted from every class' },
       ]);
     }
 
-    const outline = await buildOutline(classId, transaction);
-    const fileIds = await lockLessonFiles({ lessonId }, transaction);
+    let fileIds: string[];
 
-    await lesson.destroy({ transaction });
-    await writeSlots(
-      classId,
-      lessonsOfUnit(outline, lesson.unitId)
-        .map((entry) => entry.id)
-        .filter((id) => id !== lessonId),
-      transaction,
-    );
+    if (groupId && scope === 'class') {
+      fileIds = await removeFromClass(lesson, classId, transaction);
+      await normalizeSlots([classId], [unitId], transaction);
+    } else {
+      fileIds = await lockLessonFiles({ lessonId }, transaction);
+      await lesson.destroy({ transaction });
+
+      if (groupId) {
+        await renumberLinked(groupId, unitId, transaction);
+      }
+
+      await normalizeSlots(groupId ? locked.classIds : [classId], [unitId], transaction);
+    }
 
     return deleteFileRows(fileIds, transaction);
   });

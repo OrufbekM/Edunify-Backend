@@ -21,7 +21,9 @@ export function orderOutOfRange(max: number): AppError {
 }
 
 // Gives the rows positions 0..n-1 in the order listed, so the group stays dense
-// (contract 4). Rows already in place are left alone.
+// (contract 4). Rows already in place are left alone. The rows are locked in id order first:
+// content writes in a class group lock several classes in that order too, so the two can't
+// deadlock.
 export async function writePositions(
   table: PositionedTable,
   ids: string[],
@@ -30,6 +32,11 @@ export async function writePositions(
   if (ids.length === 0) {
     return;
   }
+
+  await sequelize.query(`SELECT id FROM ${table} WHERE id = ANY($ids::uuid[]) ORDER BY id FOR NO KEY UPDATE`, {
+    bind: { ids },
+    transaction,
+  });
 
   await sequelize.query(
     `UPDATE ${table} AS t

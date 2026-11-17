@@ -146,13 +146,15 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | `EMAIL_TAKEN` | 409 | The email is already registered |
 | `CATEGORY_NAME_TAKEN` | 409 | You already have a category with this name (case doesn't matter) |
 | `CATEGORY_NOT_EMPTY` | 409 | The category still has classes |
-| `LAST_UNIT` | 409 | A class must keep at least one unit; `details.classIds` names the class |
+| `LAST_UNIT` | 409 | A class must keep at least one unit; `details.classIds` names the classes (every class of a group) |
 | `INVALID_STATUS_TRANSITION` | 409 | That account status change isn't allowed (see the admin endpoints) |
 | `STUDENT_ID_IN_USE` | 409 | That student already has a row in this class |
-| `HOMEWORK_TYPE_LOCKED` | 409 | The homework type can't change once there are submissions |
+| `HOMEWORK_TYPE_LOCKED` | 409 | The homework type can't change once there are submissions (in any class that holds the lesson) |
+| `CLASS_IN_OTHER_GROUP` | 409 | A class in `linkedClassIds` is already in another group |
+| `UNIT_NOT_EMPTY` | 409 | A unit of a group can only be deleted when no class has a lesson in it |
 | `SUBMISSION_NOT_LATEST` | 409 | Only the latest version of a submission can be graded |
 | `AI_JOB_ACTIVE` | 409 | AI grading is already running for this lesson; `details.jobId` names the job |
-| `LIMIT_REACHED` | 409 | A cap was hit (see below) |
+| `LIMIT_REACHED` | 409 | A cap was hit (see below); for a class in a group, `details.classIds` names the classes over it |
 | `PAYLOAD_TOO_LARGE` | 413 | Body or file too large |
 | `UNSUPPORTED_MEDIA_TYPE` | 415 | File type not allowed |
 | `RATE_LIMITED` | 429 | Too many requests; wait the number of seconds in `Retry-After` |
@@ -180,6 +182,9 @@ Show text based on `code`; `message` is English for logs. `details` lists each p
 | Lessons per class | 500 |
 | Pages per submission | 9 |
 | Versions per student per homework | 30 |
+| Classes per group | 10 |
+
+Units and lessons per class include the group's units and linked lessons. If adding or linking something would take any class of a group past a cap, nothing changes and `LIMIT_REACHED` lists those classes in `details.classIds`.
 
 | Field | Rule |
 |---|---|
@@ -261,7 +266,7 @@ interface Class {
   publicId: string             // show as #XXXX-XXXX
   studentCount: number
   newSubmissionCount: number   // homework waiting for a grade: one per student whose latest version is 'submitted', over every lesson of the class (hidden ones too)
-  linkedClasses: { id: string; name: string }[]   // always [] for now (plan Phase 17)
+  linkedClasses: { id: string; name: string }[]   // the other classes of its group, by name; [] when it is in none
   createdAt: string
 }
 
@@ -281,7 +286,7 @@ interface LessonSummary {
   title: string
   order: number                        // 0-based within its unit in this class
   homeworkType: HomeworkType | null    // null = no homework
-  linked?: boolean                     // teachers only; always false until class groups (plan Phase 17)
+  linked?: boolean                     // teachers only; true for a lesson shared by the class group
   visible?: boolean                    // teachers only; students only ever get visible lessons
   newSubmissionCount?: number          // teachers only: the same count for this lesson in this class; 0 without homework
 }
@@ -308,7 +313,16 @@ interface LessonDetail {
   mySubmission?: Submission | null     // students only: their latest version
 }
 
-interface ContentImpact { classes: { id: string; name: string; submissionCount: number }[] }
+interface ContentImpact { classes: { id: string; name: string; submissionCount: number }[] }   // every class holding it, this one included
+
+interface GroupPreviewItem {
+  classId: string
+  name: string
+  addedUnits: number           // what a class gets when the save goes through: units...
+  addedLessons: number         // ...and linked lessons (hidden at first)
+  convertedUnits: number       // what turns into class-only copies in a class that leaves, or is left alone
+  convertedLessons: number
+}
 
 type SubmissionContent =
   | { type: 'text'; text: string }
@@ -412,8 +426,19 @@ Categories group a teacher's classes.
 | `GET /classes?categoryId=` | Your classes in category order, then class `order`; `categoryId` is an optional filter. `200 { items: Class[] }` |
 | `POST /classes` | Body `{ categoryId, name }`. Adds it last in its category, with its first unit, `Unit 1`. `201 Class`, with its generated `publicId` to give to students. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a category that isn't yours. |
 | `GET /classes/:id` | `200 Class` |
-| `PATCH /classes/:id` | Body `{ categoryId?, name?, order? }`. `order` is the 0-based position in the category the class ends up in: the new one when `categoryId` changes, else its own. Moving to another category without `order` puts it last there. Send both on every drag and drop. `200 Class`. Error: `VALIDATION_ERROR` for an `order` past the end or a category that isn't yours. |
-| `DELETE /classes/:id` | Deletes the class with everything in it: roster, lessons, homework, submissions, grades and files. The classes after it move up one. `204` |
+| `PATCH /classes/:id` | Body `{ categoryId?, name?, order?, linkedClassIds? }`. `order` is the 0-based position in the category the class ends up in: the new one when `categoryId` changes, else its own. Moving to another category without `order` puts it last there. Send both on every drag and drop. `linkedClassIds` sets the class's group (see below). `200 Class`. Errors: `VALIDATION_ERROR` for an `order` past the end or a category that isn't yours, `CLASS_IN_OTHER_GROUP`, `LIMIT_REACHED`, `NOT_FOUND` for a linked class that isn't yours. |
+| `POST /classes/:id/linked-classes/preview` | Body `{ linkedClassIds }`. What saving that list would do, without doing it: `200 { items: GroupPreviewItem[] }`, one per class that changes (this class first, then the listed ones in order, then the rest by name); empty when nothing would. Same errors as the save. Show it before the save. |
+| `DELETE /classes/:id` | Deletes the class with everything in it: roster, lessons, homework, submissions, grades and files. In a group it leaves first: linked lessons only it held go, the others stay with the group, and a group left with one class is dissolved. The classes after it move up one. `204` |
+
+#### Class groups
+
+Two to ten of your classes, in any categories, can share units and lessons. `linkedClassIds` on `PATCH /classes/:id` is the whole list of *other* classes in the group after the save (0 to 9 ids, not the class itself): leave it out to change nothing, send `[]` to take this class out of its group.
+
+- **Making or joining a group.** Every class in a group holds every unit of the group, in the same order. When a group is made, the class you save goes first: its units, then each listed class's units in list order. A class joining an existing group gets the group's units first, then its own at the end (the other classes get its units at the end too), and every linked lesson of the group, **hidden** from its students until you show it. A class's own lessons stay its own and keep their places.
+- **Leaving.** A class that leaves keeps everything it holds as its own copies: the units and the linked lessons, with their homework and files, in the same places, with the same visibility. Its students' submissions and grades move to the copies. A group left with one class is dissolved, and that class gets copies the same way.
+- A class already in another group can't be listed (`CLASS_IN_OTHER_GROUP`). Nothing changes when a save fails.
+
+In a group, units are always shared: adding, renaming or moving a unit does it in every class, and deleting one works only when no class has a lesson in it (`UNIT_NOT_EMPTY`). Lessons are either **class-only** (in one class, the default) or **linked** (shared by the group). Editing a linked lesson's title, file or homework changes it in every class; whether students see it, the student work, grades, journal, AI jobs and counts stay per class.
 
 ### Class roster (teachers)
 
@@ -444,25 +469,25 @@ A teacher can hide a lesson from students (`visible: false`, per class). Hidden 
 | Endpoint | Who | What it does |
 |---|---|---|
 | `GET /classes/:classId/outline` | T, S | The class's structure: `200 { units: Unit[], lessons: LessonSummary[] }`. Units in order; lessons in outline order (unit order, then lesson order), each with its `number`. |
-| `POST /classes/:classId/units` | T | Body `{ title }`. Adds it at the end. `201 Unit`. Error: `LIMIT_REACHED`. |
-| `PATCH /units/:id?classId=` | T | Body `{ title?, order? }`; `order` moves it to that position. `200 Unit`. An `order` out of range is a `VALIDATION_ERROR`. |
-| `DELETE /units/:id?classId=` | T | Deletes the unit with its lessons, their homework and submissions. `204`. Error: `LAST_UNIT` for the class's only unit. |
-| `POST /classes/:classId/lessons` | T | Body `{ title, unitId, linked? }`. Adds it visible, at the end of its unit. `201 LessonDetail`. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a unit of another class or `linked: true` (class groups come later). |
+| `POST /classes/:classId/units` | T | Body `{ title }`. Adds it at the end (in a group, at the end in every class). `201 Unit`. Error: `LIMIT_REACHED`. |
+| `PATCH /units/:id?classId=` | T | Body `{ title?, order? }`; `order` moves it to that position. In a group both change in every class. `200 Unit`. An `order` out of range is a `VALIDATION_ERROR`. |
+| `DELETE /units/:id?classId=` | T | Outside a group: deletes the unit with its lessons, their homework and submissions. In a group: deletes it from every class, only when no class has a lesson in it. `204`. Errors: `LAST_UNIT` for the only unit, `UNIT_NOT_EMPTY`. |
+| `POST /classes/:classId/lessons` | T | Body `{ title, unitId, linked? }`. Adds it visible, at the end of its unit. `linked: true` (only in a group) shares it: every other class of the group gets it too, hidden. `201 LessonDetail`. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for a unit of another class or `linked: true` outside a group. |
 | `GET /lessons/:id?classId=` | T, S | `200 LessonDetail`. Students also get `mySubmission`: their latest version, or `null`. |
-| `PATCH /lessons/:id?classId=` | T | Body `{ title?, unitId?, order?, visible?, linked? }`. `order` is the position in the unit the lesson ends up in (the new one when `unitId` changes); moving to another unit without `order` puts it last there. Send both on every drag and drop. `visible` hides or shows it in this class. `200 LessonDetail` |
-| `DELETE /lessons/:id?classId=&scope=` | T | `scope` is `class` (the default): deletes the lesson with its homework and submissions. `scope=all` is only for linked lessons (later). `204` |
+| `PATCH /lessons/:id?classId=` | T | Body `{ title?, unitId?, order?, visible?, linked? }`. `order` is the position in the unit the lesson ends up in (the new one when `unitId` changes); moving to another unit without `order` puts it last there. Send both on every drag and drop. `visible` hides or shows it in this class only. A linked lesson moves in every class: it goes right after the linked lesson before it in this class's list, so a class-only lesson can keep the spot you aimed for and the moved one lands just after it; reload the outline after a move. `linked: true` shares a class-only lesson where it is (the other classes get it hidden); `linked: false` replaces a linked lesson in this class with a class-only copy in the same place, with this class's work, so the response has a **new `id`**. `200 LessonDetail`. Errors: `LIMIT_REACHED`, `VALIDATION_ERROR` for `linked: true` outside a group. |
+| `DELETE /lessons/:id?classId=&scope=` | T | `scope=class` (the default) takes the lesson out of this class with this class's submissions; a class-only lesson is deleted, and so is a linked one that no class holds any more. `scope=all` (linked lessons only) deletes it with its submissions in every class. `204`. A `scope=all` on a class-only lesson is a `VALIDATION_ERROR`. |
 | `GET /lessons/:id/impact?classId=` | T | Which classes hold the lesson and how many of their students handed it in: `200 ContentImpact`. Show it before a delete. |
 
 ### Lesson file and homework (teachers)
 
-Each lesson can have one file to read and one piece of homework. Uploads are `multipart/form-data` with the file in the field `file`. Every path here takes `?classId=`.
+Each lesson can have one file to read and one piece of homework. Uploads are `multipart/form-data` with the file in the field `file`. Every path here takes `?classId=`. On a linked lesson every change here reaches every class that holds it. Copies made when a class leaves its group share their files with the original; a file is deleted only once no lesson or homework uses it.
 
 | Endpoint | What it does |
 |---|---|
 | `PUT /lessons/:id/lesson-file` | Uploads or replaces the lesson's file (`.md` or `.pdf`). `200 LessonDetail` |
 | `DELETE /lessons/:id/lesson-file` | Removes it. `200 LessonDetail` |
-| `PUT /lessons/:id/homework` | Creates or replaces the homework. Body `{ type, instructionsText? }`; leaving `instructionsText` out clears it, and an instructions file stays. `200 LessonDetail`. Error: `HOMEWORK_TYPE_LOCKED` when changing the type after students have submitted. |
-| `DELETE /lessons/:id/homework` | Deletes the homework with all its submissions and grades. `200 LessonDetail` |
+| `PUT /lessons/:id/homework` | Creates or replaces the homework. Body `{ type, instructionsText? }`; leaving `instructionsText` out clears it, and an instructions file stays. `200 LessonDetail`. Error: `HOMEWORK_TYPE_LOCKED` when changing the type after students in any class holding the lesson have submitted. |
+| `DELETE /lessons/:id/homework` | Deletes the homework with all its submissions and grades, in every class that holds the lesson (`GET /lessons/:id/impact` has the counts). `200 LessonDetail` |
 | `PUT /lessons/:id/homework/file` | Uploads or replaces an instructions file (`.md` or `.pdf`). Needs homework first. `200 LessonDetail` |
 | `DELETE /lessons/:id/homework/file` | Removes it. `200 LessonDetail` |
 

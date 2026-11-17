@@ -4,7 +4,7 @@ import { emptyQuerySchema, idParamsSchema } from '../../lib/validation.js';
 import { getAuth, requireAuth } from '../../middleware/auth.js';
 import { generalLimiter } from '../../middleware/rateLimit.js';
 import { requireRole } from '../../middleware/role.js';
-import { createClassBody, listClassesQuery, updateClassBody } from './schemas.js';
+import { createClassBody, listClassesQuery, previewLinkedClassesBody, updateClassBody } from './schemas.js';
 import * as classes from './service.js';
 
 export const classesRouter = Router();
@@ -35,6 +35,14 @@ classesRouter.patch('/:id', async (req, res) => {
   const body = updateClassBody.parse(req.body);
 
   res.json(await classes.updateClass(getAuth(req).id, id, body));
+});
+
+// What saving these linkedClassIds would do, changing nothing (contract 8.3).
+classesRouter.post('/:id/linked-classes/preview', async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+  const { linkedClassIds } = previewLinkedClassesBody.parse(req.body);
+
+  res.json({ items: await classes.previewLinkedClasses(getAuth(req).id, id, linkedClassIds) });
 });
 
 classesRouter.delete('/:id', async (req, res) => {

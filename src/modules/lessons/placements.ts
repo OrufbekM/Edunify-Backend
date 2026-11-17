@@ -175,6 +175,27 @@ export async function writeSlots(classId: string, lessonIds: string[], transacti
   );
 }
 
+// After a change to these units, every class listed gets its class-only slots rewritten to
+// the indices they now have (plan, contract fix 7). The lists don't change: it only keeps
+// stale slots from pointing past the end once linked lessons have moved.
+export async function normalizeSlots(
+  classIds: readonly string[],
+  unitIds: readonly string[],
+  transaction: Transaction,
+): Promise<void> {
+  for (const classId of classIds) {
+    const outline = await buildOutline(classId, transaction);
+
+    for (const unitId of new Set(unitIds)) {
+      await writeSlots(
+        classId,
+        lessonsOfUnit(outline, unitId).map((lesson) => lesson.id),
+        transaction,
+      );
+    }
+  }
+}
+
 // The lesson's placement in the class, or null if the class doesn't hold it.
 export async function findPlacement(
   classId: string,
