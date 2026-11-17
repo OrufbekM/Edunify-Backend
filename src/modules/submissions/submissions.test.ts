@@ -174,25 +174,30 @@ describe('POST /homeworks/:homeworkId/submissions, text', () => {
 });
 
 describe('POST /homeworks/:homeworkId/submissions, code', () => {
-  it('stores all three fields, trimmed, and takes one with content', async () => {
+  it('stores all three fields exactly as sent, spaces and newlines included, and takes one with content', async () => {
     const { homeworkId } = await addHomework('code');
+    const sent = { html: '  <h1>Hi</h1>\n', css: '', js: '   ' };
 
-    const res = await api(student).post(submissionsPath(homeworkId), { html: '  <h1>Hi</h1>\n', css: '', js: '   ' });
+    const res = await api(student).post(submissionsPath(homeworkId), sent);
 
     expect(res.status).toBe(201);
-    expect(res.body.content).toEqual({ type: 'code', html: '<h1>Hi</h1>', css: '', js: '' });
+    expect(res.body.content).toEqual({ type: 'code', ...sent });
+    expect((await api(student).get(`/api/v1/submissions/${res.body.id}`)).body.content).toEqual({ type: 'code', ...sent });
   });
 
-  it('accepts 100 000 characters in each field', async () => {
+  it('accepts 100 000 characters in each field, counted as sent', async () => {
     const { homeworkId } = await addHomework('code');
     const big = 'x'.repeat(100_000);
+    const padded = ` ${'x'.repeat(99_998)} `;
 
     expect((await api(student).post(submissionsPath(homeworkId), { html: big, css: big, js: big })).status).toBe(201);
+    expect((await api(student).post(submissionsPath(homeworkId), { html: padded, css: '', js: '' })).status).toBe(201);
   });
 
   it.each([
     ['all three empty', { html: '', css: ' ', js: '\n' }, ''],
     ['a field over 100 000 characters', { html: 'x'.repeat(100_001), css: '', js: '' }, 'html'],
+    ['a field over 100 000 characters only with its spaces', { html: ` ${'x'.repeat(99_999)} `, css: '', js: '' }, 'html'],
     ['a missing field', { html: '<p>', js: '' }, 'css'],
     ['an unknown field', { html: '<p>', css: '', js: '', python: 'print()' }, 'python'],
     ['a text body', { text: 'answer' }, 'text'],
@@ -477,52 +482,15 @@ describe('races', () => {
   });
 });
 
-describe('the teacher is notified', () => {
-  async function teacherItems() {
-    return (await api(teacher).get('/api/v1/notifications')).body.items as Array<Record<string, unknown>>;
-  }
-
-  it('with a submitted notification that names the student as on the roster', async () => {
-    const { lessonId, homeworkId } = await addHomework('text', 'Kasrlar');
-
-    const submission = await submitText(homeworkId);
-
-    await expect(teacherItems()).resolves.toEqual([
-      {
-        id: expect.any(String),
-        kind: 'submitted',
-        submissionId: submission.id,
-        lessonId,
-        classId: schoolClass.id,
-        lessonTitle: 'Kasrlar',
-        className: 'Maths 7A',
-        studentName: 'Ali Valiyev',
-        createdAt: expect.stringMatching(ISO_MILLIS),
-      },
-    ]);
-  });
-
-  it("and a new version replaces the unread notification for the previous one", async () => {
+describe('the teacher', () => {
+  it('gets no notification for a new submission or version: it shows in newSubmissionCount (contract 8.12)', async () => {
     const { homeworkId } = await addHomework('text');
+
     await submitText(homeworkId, 'one');
-
-    const second = await submitText(homeworkId, 'two');
-
-    await expect(teacherItems()).resolves.toMatchObject([{ submissionId: second.id }]);
-    expect((await api(teacher).get('/api/v1/notifications/count')).body).toEqual({ unreadCount: 1 });
-  });
-
-  it('but a notification the teacher has read stays as it was', async () => {
-    const { homeworkId } = await addHomework('text');
-    const first = await submitText(homeworkId, 'one');
-    const [notice] = await teacherItems();
-    await api(teacher).post(`/api/v1/notifications/${notice?.id}/read`);
-
     await submitText(homeworkId, 'two');
 
-    await expect(sequelize.query('SELECT submission_id FROM notifications WHERE read_at IS NOT NULL', { plain: true })).resolves.toEqual({
-      submission_id: first.id,
-    });
+    await expect(sequelize.query('SELECT count(*)::int AS count FROM notifications', { plain: true })).resolves.toEqual({ count: 0 });
+    expect((await api(teacher).get(`/api/v1/classes/${schoolClass.id}`)).body.newSubmissionCount).toBe(1);
   });
 });
 
@@ -616,6 +584,23 @@ describe('GET /submissions/:id', () => {
     });
   });
 
+  it('gives the student 404 while the lesson is hidden in the class, the same as a missing one; the teacher still sees it', async () => {
+    const { lessonId, homeworkId } = await addHomework('text');
+    const submission = await submitText(homeworkId);
+    const lessonPath = `/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`;
+    const missing = await api(student).get(`/api/v1/submissions/${randomUUID()}`);
+
+    await api(teacher).patch(lessonPath, { visible: false });
+
+    const hidden = await api(student).get(`/api/v1/submissions/${submission.id}`);
+    expectError(hidden, 404, 'NOT_FOUND');
+    expect(hidden.body).toEqual(missing.body);
+    expect((await api(teacher).get(`/api/v1/submissions/${submission.id}`)).status).toBe(200);
+
+    await api(teacher).patch(lessonPath, { visible: true });
+    expect((await api(student).get(`/api/v1/submissions/${submission.id}`)).status).toBe(200);
+  });
+
   it('gives VALIDATION_ERROR for a malformed id or a query parameter', async () => {
     expectError(await api(teacher).get('/api/v1/submissions/nope'), 400, 'VALIDATION_ERROR');
     expectError(await api(teacher).get(`/api/v1/submissions/${randomUUID()}?all=1`), 400, 'VALIDATION_ERROR');
@@ -661,6 +646,25 @@ describe('GET /student/submissions', () => {
     const all = await api(student).get('/api/v1/student/submissions');
     expect(all.body.items.map((item: { lesson: { title: string } }) => item.lesson.title)).toEqual(['There']);
     expect((await api(student).get(`/api/v1/student/submissions?classId=${schoolClass.id}`)).body).toEqual({ items: [] });
+  });
+
+  it('leaves out lessons hidden in the class, and lists them again once shown', async () => {
+    const shown = await addHomework('text', 'Shown');
+    const hidden = await addHomework('text', 'Hidden');
+    await submitText(shown.homeworkId);
+    await submitText(hidden.homeworkId);
+    const hiddenPath = `/api/v1/lessons/${hidden.lessonId}?classId=${schoolClass.id}`;
+    const titles = async (query = '') =>
+      (await api(student).get(`/api/v1/student/submissions${query}`)).body.items.map(
+        (item: { lesson: { title: string } }) => item.lesson.title,
+      );
+
+    await api(teacher).patch(hiddenPath, { visible: false });
+    await expect(titles()).resolves.toEqual(['Shown']);
+    await expect(titles(`?classId=${schoolClass.id}`)).resolves.toEqual(['Shown']);
+
+    await api(teacher).patch(hiddenPath, { visible: true });
+    await expect(titles()).resolves.toEqual(['Hidden', 'Shown']);
   });
 
   it("shows a re-linked row's work to the new account only once it has claimed the class", async () => {

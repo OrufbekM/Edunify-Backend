@@ -9,7 +9,7 @@ import { resetRateLimits } from '../../middleware/rateLimit.js';
 import { useTestDatabase } from '../../test/database.js';
 import { firstUnitId } from '../../test/content.js';
 import { api, createTestUser, type TestUser } from '../../test/users.js';
-import { notify, removeUnread } from './service.js';
+import { notify, removeUnreadGradeNotices } from './service.js';
 
 useTestDatabase();
 
@@ -76,14 +76,14 @@ describe('notify', () => {
     expect(rows[0]?.createdAt.getTime()).toBeGreaterThan(first.createdAt.getTime());
   });
 
-  it('removeUnread deletes an unread notification and leaves a read one', async () => {
+  it('removeUnreadGradeNotices deletes an unread notification and leaves a read one', async () => {
     const [unread, read] = [await submit('one'), await submit('two')];
     await notify(student.id, unread, 'graded');
     await notify(student.id, read, 'graded');
     await Notification.update({ readAt: new Date() }, { where: { userId: student.id, submissionId: read } });
 
-    await removeUnread(student.id, unread);
-    await removeUnread(student.id, read);
+    await removeUnreadGradeNotices(unread);
+    await removeUnreadGradeNotices(read);
 
     await expect(Notification.findAll({ where: { userId: student.id }, attributes: ['submissionId'], raw: true })).resolves.toEqual([
       { submissionId: read },
@@ -92,7 +92,7 @@ describe('notify', () => {
 });
 
 describe('GET /notifications and /notifications/count', () => {
-  it("gives a student's graded item with the lesson and class, and no studentName", async () => {
+  it("gives a student's graded item as the contract's NotificationItem", async () => {
     const submissionId = await submit();
     await notify(student.id, submissionId, 'graded');
 
@@ -105,17 +105,17 @@ describe('GET /notifications and /notifications/count', () => {
         classId: schoolClass.id,
         lessonTitle: 'Equations',
         className: 'Algebra',
-        studentName: null,
         createdAt: expect.stringMatching(ISO_MILLIS),
       },
     ]);
     await expect(unreadCount(student)).resolves.toBe(1);
   });
 
-  it("names the student as on the teacher's roster", async () => {
+  it('gets nothing from a new submission: only grading notifies', async () => {
     await submit();
+    await submit('again');
 
-    await expect(items(teacher)).resolves.toMatchObject([{ kind: 'submitted', studentName: 'Roster Name' }]);
+    await expect(Notification.count()).resolves.toBe(0);
   });
 
   it('lists unread items only, newest first', async () => {
@@ -163,13 +163,40 @@ describe('GET /notifications and /notifications/count', () => {
     await expect(unreadCount(stranger)).resolves.toBe(0);
   });
 
-  it('leaves out notifications for a row the student is no longer linked to', async () => {
+  it('leaves out notifications for a row the student is no longer connected to', async () => {
     await notify(student.id, await submit(), 'graded');
 
     await api(teacher).patch(`/api/v1/classes/${schoolClass.id}/students/${rowId}`, { studentPublicId: null });
 
     await expect(items(student)).resolves.toEqual([]);
     await expect(unreadCount(student)).resolves.toBe(0);
+  });
+
+  it('takes them away from the old account after a reconnect, even once the new one is connected', async () => {
+    const submissionId = await submit();
+    await notify(student.id, submissionId, 'graded');
+    const newAccount = await createTestUser('student');
+
+    await api(teacher).patch(`/api/v1/classes/${schoolClass.id}/students/${rowId}`, { studentPublicId: newAccount.publicId });
+    await api(newAccount).post('/api/v1/student/claims', { classPublicId: schoolClass.publicId });
+
+    await expect(items(student)).resolves.toEqual([]);
+    await expect(unreadCount(student)).resolves.toBe(0);
+    await expect(items(newAccount)).resolves.toEqual([]);
+  });
+
+  it('leaves out notifications for a lesson hidden in the class, until it is shown again', async () => {
+    const submissionId = await submit();
+    await notify(student.id, submissionId, 'graded');
+    const lessonPath = `/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`;
+
+    await api(teacher).patch(lessonPath, { visible: false });
+    await expect(items(student)).resolves.toEqual([]);
+    await expect(unreadCount(student)).resolves.toBe(0);
+
+    await api(teacher).patch(lessonPath, { visible: true });
+    await expect(items(student)).resolves.toMatchObject([{ submissionId }]);
+    await expect(unreadCount(student)).resolves.toBe(1);
   });
 
   it('leaves out notifications for a linked row until the student has claimed the class', async () => {
@@ -191,38 +218,40 @@ describe('GET /notifications and /notifications/count', () => {
 });
 
 describe('POST /notifications/:id/read', () => {
-  it('marks it read with an empty 204, and again changes nothing', async () => {
-    await submit();
-    const [item] = await items(teacher);
+  beforeEach(async () => {
+    await notify(student.id, await submit(), 'graded');
+  });
 
-    const res = await api(teacher).post(`/api/v1/notifications/${item?.id}/read`);
-    const again = await api(teacher).post(`/api/v1/notifications/${item?.id}/read`);
+  it('marks it read with an empty 204, and again changes nothing', async () => {
+    const [item] = await items(student);
+
+    const res = await api(student).post(`/api/v1/notifications/${item?.id}/read`);
+    const again = await api(student).post(`/api/v1/notifications/${item?.id}/read`);
 
     expect(res.status).toBe(204);
     expect(res.text).toBe('');
     expect(again.status).toBe(204);
-    await expect(items(teacher)).resolves.toEqual([]);
-    await expect(unreadCount(teacher)).resolves.toBe(0);
+    await expect(items(student)).resolves.toEqual([]);
+    await expect(unreadCount(student)).resolves.toBe(0);
   });
 
   it("gives 404 NOT_FOUND for someone else's notification, the same as a missing one, and leaves it unread", async () => {
-    await submit();
-    const [item] = await items(teacher);
+    const [item] = await items(student);
+    const stranger = await createTestUser('student');
 
-    const forOther = await api(student).post(`/api/v1/notifications/${item?.id}/read`);
-    const forMissing = await api(student).post(`/api/v1/notifications/${randomUUID()}/read`);
+    const forOther = await api(stranger).post(`/api/v1/notifications/${item?.id}/read`);
+    const forMissing = await api(stranger).post(`/api/v1/notifications/${randomUUID()}/read`);
 
     expectError(forOther, 404, 'NOT_FOUND');
     expect(forOther.body).toEqual(forMissing.body);
-    await expect(unreadCount(teacher)).resolves.toBe(1);
+    await expect(unreadCount(student)).resolves.toBe(1);
   });
 
   it('gives VALIDATION_ERROR for a malformed id or a body field', async () => {
-    await submit();
-    const [item] = await items(teacher);
+    const [item] = await items(student);
 
-    expectError(await api(teacher).post('/api/v1/notifications/nope/read'), 400, 'VALIDATION_ERROR');
-    expectError(await api(teacher).post(`/api/v1/notifications/${item?.id}/read`, { read: true }), 400, 'VALIDATION_ERROR');
+    expectError(await api(student).post('/api/v1/notifications/nope/read'), 400, 'VALIDATION_ERROR');
+    expectError(await api(student).post(`/api/v1/notifications/${item?.id}/read`, { read: true }), 400, 'VALIDATION_ERROR');
   });
 });
 
@@ -233,5 +262,18 @@ describe('access', () => {
     ['POST /notifications/:id/read', () => request(app).post(`/api/v1/notifications/${randomUUID()}/read`)],
   ])('gives no token 401 UNAUTHENTICATED on %s', async (_route, send) => {
     expectError(await send(), 401, 'UNAUTHENTICATED');
+  });
+
+  it('gives teachers and the admin 403 FORBIDDEN on every route: teachers have no notifications', async () => {
+    const admin = await createTestUser('admin');
+    await notify(student.id, await submit(), 'graded');
+    const [item] = await items(student);
+
+    for (const user of [teacher, admin]) {
+      expectError(await api(user).get('/api/v1/notifications/count'), 403, 'FORBIDDEN');
+      expectError(await api(user).get('/api/v1/notifications'), 403, 'FORBIDDEN');
+      expectError(await api(user).post(`/api/v1/notifications/${item?.id}/read`), 403, 'FORBIDDEN');
+    }
+    await expect(unreadCount(student)).resolves.toBe(1);
   });
 });

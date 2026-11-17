@@ -8,19 +8,12 @@ import type {
   Role,
   SubmissionStatus,
 } from '../../db/models/enums.js';
-import {
-  ClassStudent,
-  Homework,
-  SchoolClass,
-  Submission,
-  SubmissionPage,
-} from '../../db/models/index.js';
+import { ClassStudent, Homework, Submission, SubmissionPage } from '../../db/models/index.js';
 import { AppError, notFoundAs } from '../../lib/errors.js';
 import { toFileRef, type FileRef } from '../../lib/signedUrl.js';
 import type { Upload } from '../../middleware/upload.js';
 import { getOwnClass } from '../classes/service.js';
 import { createFileRecord, withStoredFiles } from '../files/service.js';
-import { notify, removeUnread } from '../notifications/service.js';
 import { getConnectedClassStudent } from '../students/service.js';
 import { assertVisibleToStudent, findPlacement } from '../lessons/placements.js';
 
@@ -438,21 +431,11 @@ export async function createSubmission(
           );
         }
 
-        const { teacherId } = (await SchoolClass.findByPk(classId, {
-          attributes: ['teacherId'],
-          transaction,
-        })) as SchoolClass;
-
-        if (previous) {
-          // An AI suggestion for the old version no longer fits (plan, Phase 8), and the new
-          // version's notice replaces the teacher's unread one for it (plan, open item 6).
-          if (previous.aiSuggestion !== null) {
-            await previous.update({ aiSuggestion: null }, { transaction });
-          }
-          await removeUnread(teacherId, previous.id, transaction);
+        // An AI suggestion for the old version no longer fits (plan, Phase 8). The teacher
+        // gets no notification: the new version shows in newSubmissionCount (contract 8.12).
+        if (previous && previous.aiSuggestion !== null) {
+          await previous.update({ aiSuggestion: null }, { transaction });
         }
-
-        await notify(teacherId, submission.id, 'submitted', transaction);
 
         const [dto] = await toDtos(
           await submissionRows('WHERE s.id = $id', { id: submission.id }, transaction),
@@ -464,8 +447,9 @@ export async function createSubmission(
   );
 }
 
-// Teacher: a submission in an own class. Student: one of their own roster row's, while the
-// connection holds (contract 5).
+// Teacher: a submission in an own class, hidden lessons included. Student: one of their own
+// roster row's, while the connection holds (contract 5) and the class shows the lesson
+// (plan, open item 2).
 export async function getSubmission(
   viewer: { id: string; role: Role },
   submissionId: string,
@@ -480,8 +464,9 @@ export async function getSubmission(
     await notFoundAs(getOwnClass(viewer.id, row.classId), submissionNotFound);
   } else {
     const own = await notFoundAs(getConnectedClassStudent(viewer.id, row.classId), submissionNotFound);
+    const placement = own.id === row.classStudentId ? await findPlacement(row.classId, row.lessonId) : null;
 
-    if (own.id !== row.classStudentId) {
+    if (!placement?.visible) {
       throw submissionNotFound();
     }
   }
@@ -495,7 +480,8 @@ export async function getSubmission(
   return { ...(dto as SubmissionDto), versions: versions.map(toVersionDto) };
 }
 
-// The latest version per homework, newest first, from connected classes only (contract 8.8).
+// The latest version per homework, newest first, from connected classes only, and only for
+// lessons the class shows (contract 8.8).
 export async function listMySubmissions(
   userId: string,
   filter: { classId?: string },
@@ -517,6 +503,7 @@ export async function listMySubmissions(
        JOIN homeworks h ON h.id = s.homework_id
        JOIN lessons l ON l.id = h.lesson_id
        JOIN classes c ON c.id = cs.class_id
+       JOIN class_lessons cl ON cl.class_id = cs.class_id AND cl.lesson_id = l.id AND cl.visible
       WHERE cs.student_user_id = $userId
         ${filter.classId ? 'AND cs.class_id = $classId' : ''}
         AND EXISTS (SELECT 1 FROM class_claims cc

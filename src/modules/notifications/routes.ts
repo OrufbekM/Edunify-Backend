@@ -7,10 +7,11 @@ import { requireRole } from '../../middleware/role.js';
 import { noBody } from './schemas.js';
 import * as notifications from './service.js';
 
-// Teachers and students, each for their own notifications; the admin has none (contract 5).
+// Students only, each for their own notifications (contract 5 and 8.12). Teachers see
+// newSubmissionCount instead, and the admin has none.
 export const notificationsRouter = Router();
 
-notificationsRouter.use(requireAuth, generalLimiter, requireRole('teacher', 'student'));
+notificationsRouter.use(requireAuth, generalLimiter, requireRole('student'));
 
 notificationsRouter.get('/count', async (req, res) => {
   emptyQuerySchema.parse(req.query);

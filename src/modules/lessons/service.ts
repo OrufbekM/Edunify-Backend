@@ -25,6 +25,7 @@ import {
   withStoredFile,
 } from '../files/service.js';
 import { getConnectedClassStudent } from '../students/service.js';
+import { newSubmissionCountsByLesson } from '../submissions/counts.js';
 import { latestSubmissionOf, type SubmissionDto } from '../submissions/service.js';
 import {
   assertVisibleToStudent,
@@ -249,7 +250,8 @@ function unitIdsOf(outline: ClassOutline): string[] {
 
 // Units in order, then lessons in outline order, each with its number (contract 8.6).
 // Students get visible lessons only, and only units that hold one; numbers keep their gaps.
-// One REPEATABLE READ snapshot, so a move made between the reads can't split the picture.
+// Teachers also get each lesson's newSubmissionCount. One REPEATABLE READ snapshot, so a
+// move made between the reads can't split the picture.
 export async function getOutline(viewer: Viewer, classId: string): Promise<OutlineDto> {
   return sequelize.transaction(
     { isolationLevel: Transaction.ISOLATION_LEVELS.REPEATABLE_READ },
@@ -259,6 +261,7 @@ export async function getOutline(viewer: Viewer, classId: string): Promise<Outli
       const outline = await buildOutline(classId, transaction);
       const teacher = viewer.role === 'teacher';
       const lessons = teacher ? outline.lessons : outline.lessons.filter((lesson) => lesson.visible);
+      const newSubmissions = teacher ? await newSubmissionCountsByLesson(classId, transaction) : new Map<string, number>();
       const unitsWithLessons = new Set(lessons.map((lesson) => lesson.unitId));
 
       return {
@@ -272,8 +275,13 @@ export async function getOutline(viewer: Viewer, classId: string): Promise<Outli
           title: lesson.title,
           order: lesson.order,
           homeworkType: lesson.homeworkType,
-          // Counted from plan Phase 16.
-          ...(teacher ? { linked: lesson.linked, visible: lesson.visible, newSubmissionCount: 0 } : {}),
+          ...(teacher
+            ? {
+                linked: lesson.linked,
+                visible: lesson.visible,
+                newSubmissionCount: newSubmissions.get(lesson.id) ?? 0,
+              }
+            : {}),
         })),
       };
     },

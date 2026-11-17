@@ -74,7 +74,7 @@ CI runs typecheck, lint, the tests and the build on every push to `main` and `de
 - `201` means created, `200` read or updated, `202` a job was started, and `204` (with an empty body) a delete or a mark-read.
 - Ids are UUIDs. Times are ISO 8601 in UTC with milliseconds, like `2026-11-05T07:08:09.123Z`.
 - Request bodies are strict: an unknown field is a `400 VALIDATION_ERROR`.
-- Text is trimmed before it is checked, so `"  Maths "` is stored as `"Maths"`. Passwords are the exception: they are used exactly as typed.
+- Text is trimmed before it is checked, so `"  Maths "` is stored as `"Maths"`. Passwords and code answers (`html`, `css`, `js`) are the exception: they are checked and stored exactly as typed.
 - Optional text that is empty after trimming (homework instructions, a grade comment) is stored as `null`.
 
 ### Who can call what
@@ -224,7 +224,7 @@ type HomeworkType = 'text' | 'draw' | 'math' | 'code' | 'photo'   // math works 
 type SubmissionStatus = 'submitted' | 'denied' | 'graded'
 type CellStatus = 'empty' | 'submitted' | 'denied' | 'graded'    // 'empty' = nothing handed in yet
 type ConnectionState = 'not_connected' | 'awaiting_student' | 'connected'
-type NotificationKind = 'graded' | 'denied' | 'submitted'
+type NotificationKind = 'graded' | 'denied'   // students only
 type JobStatus = 'queued' | 'running' | 'done' | 'failed'
 type Grade = 2 | 3 | 4 | 5
 
@@ -260,7 +260,7 @@ interface Class {
   name: string
   publicId: string             // show as #XXXX-XXXX
   studentCount: number
-  newSubmissionCount: number   // always 0 for now (plan Phase 16)
+  newSubmissionCount: number   // homework waiting for a grade: one per student whose latest version is 'submitted', over every lesson of the class (hidden ones too)
   linkedClasses: { id: string; name: string }[]   // always [] for now (plan Phase 17)
   createdAt: string
 }
@@ -283,7 +283,7 @@ interface LessonSummary {
   homeworkType: HomeworkType | null    // null = no homework
   linked?: boolean                     // teachers only; always false until class groups (plan Phase 17)
   visible?: boolean                    // teachers only; students only ever get visible lessons
-  newSubmissionCount?: number          // teachers only; always 0 for now (plan Phase 16)
+  newSubmissionCount?: number          // teachers only: the same count for this lesson in this class; 0 without homework
 }
 
 interface Homework {
@@ -372,7 +372,6 @@ interface NotificationItem {
   classId: string
   lessonTitle: string
   className: string
-  studentName: string | null   // the roster name, on a teacher's 'submitted' notification only
   createdAt: string
 }
 ```
@@ -473,9 +472,9 @@ Each hand-in is a new version; earlier versions and their grades stay.
 
 | Endpoint | Who | What it does |
 |---|---|---|
-| `POST /homeworks/:homeworkId/submissions?classId=` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Returns `201 Submission` with the next version number, and notifies the teacher. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` when you aren't connected to the class or the lesson is hidden. |
-| `GET /student/submissions?classId=` | S | Your latest version of each homework, newest first; `classId` is an optional filter. `200 { items: [{ submission, lesson: { id, title }, class: { id, name } }] }` |
-| `GET /submissions/:id` | T, S | One version, with the list of all versions of that homework by that student, newest first. `200 Submission & { versions: SubmissionVersion[] }` |
+| `POST /homeworks/:homeworkId/submissions?classId=` | S | Hands in the homework. The body depends on the homework type: **text** JSON `{ text }`; **code** JSON `{ html, css, js }`; **draw**, **math**, **photo** `multipart/form-data` with 1 to 9 files in the repeated field `pages`, in page order. Code is stored exactly as typed: each field may be up to 100 000 characters as sent, and at least one must have something other than spaces. Returns `201 Submission` with the next version number; the teacher sees it in `newSubmissionCount`. Errors: `VALIDATION_ERROR` (content doesn't fit the type), `LIMIT_REACHED` (30 versions, or a 10th page), `PAYLOAD_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE`, and `NOT_FOUND` when you aren't connected to the class or the lesson is hidden. |
+| `GET /student/submissions?classId=` | S | Your latest version of each homework, newest first; `classId` is an optional filter. Hidden lessons are left out. `200 { items: [{ submission, lesson: { id, title }, class: { id, name } }] }` |
+| `GET /submissions/:id` | T, S | One version, with the list of all versions of that homework by that student, newest first. `200 Submission & { versions: SubmissionVersion[] }`. A student gets `404` while the lesson is hidden; the teacher still sees it. |
 
 ### Grading (teachers)
 
@@ -507,15 +506,17 @@ Which AI grades depends on the homework type and the server's settings: typed an
 | `POST /lessons/:lessonId/ai-grade?classId=` | Starts a job for that class's students. Body `{ submissionIds? }`: leave it out for every latest submission still waiting for a grade, or list specific ones (`[id]` for one student). Returns `202 AiJob`. Errors: `AI_JOB_ACTIVE` (one job per lesson and class; `details.jobId` names it), `VALIDATION_ERROR` (ids that aren't latest versions in this lesson, or nothing to grade), `AI_UNAVAILABLE`, `RATE_LIMITED` (5 a minute). |
 | `GET /ai-jobs/:id` | The job's progress: `200 AiJob`. Poll it every 2 seconds while `status` is `queued` or `running`; when it turns `done` or `failed`, reload the grading page. `done` means every submission was processed, some perhaps in `failed`; `failed` means the job itself couldn't run, with the reason in `error`. |
 
-### Notifications (any signed-in user)
+### Notifications (students)
 
-Teachers get `submitted` when a student hands something in; students get `graded` or `denied`. There is at most one notification per user and submission: a new event on the same submission updates it and makes it unread again.
+Students get `graded` or `denied` when the teacher grades or sends back their work. There is at most one notification per student and submission: a new event on the same submission updates it and makes it unread again, and removing the grade takes back an unread one. A student only sees notifications for classes they are connected to now (after a reconnect the old account loses them) and for lessons the class shows.
+
+Teachers have no notifications and get `403 FORBIDDEN` here, like the admin. They see `newSubmissionCount` on each class (`GET /classes`) and on each lesson in the outline instead: it goes up when a student hands in a new version or a grade is removed, and down when the teacher grades or sends it back. Poll it every 45 seconds.
 
 | Endpoint | What it does |
 |---|---|
 | `GET /notifications/count` | `200 { unreadCount }`, cheap enough to poll. |
 | `GET /notifications` | Unread notifications, newest first, at most 100. `200 { items: NotificationItem[] }` |
-| `POST /notifications/:id/read` | Marks one read. No body. `204`, also if it was already read. Mark a teacher's notification read when they open the submission, and a student's when they open the homework. |
+| `POST /notifications/:id/read` | Marks one read. No body. `204`, also if it was already read. Mark it read when the student opens the homework. |
 
 ### Files
 

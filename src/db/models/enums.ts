@@ -15,7 +15,8 @@ export type HomeworkType = (typeof HOMEWORK_TYPES)[number];
 export const SUBMISSION_STATUSES = ['submitted', 'denied', 'graded'] as const;
 export type SubmissionStatus = (typeof SUBMISSION_STATUSES)[number];
 
-export const NOTIFICATION_KINDS = ['graded', 'denied', 'submitted'] as const;
+// Students only: teachers see newSubmissionCount instead (contract 8.12).
+export const NOTIFICATION_KINDS = ['graded', 'denied'] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 export const JOB_STATUSES = ['queued', 'running', 'done', 'failed'] as const;

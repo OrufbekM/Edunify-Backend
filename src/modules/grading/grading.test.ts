@@ -382,21 +382,14 @@ describe('grading notifies the student', () => {
 
     await api(teacher).put(gradePath(submissionId), { value: 5 });
     const [graded] = await itemsOf(student);
-    expect(graded).toMatchObject({ kind: 'graded', submissionId, lessonId, studentName: null });
+    expect(graded).toMatchObject({ kind: 'graded', submissionId, lessonId });
+    expect(graded).not.toHaveProperty('studentName');
 
     await api(student).post(`/api/v1/notifications/${graded?.id}/read`);
     await expect(itemsOf(student)).resolves.toEqual([]);
 
     await api(teacher).put(gradePath(submissionId), { denied: true, comment: 'Redo' });
     await expect(itemsOf(student)).resolves.toEqual([expect.objectContaining({ id: graded?.id, kind: 'denied' })]);
-  });
-
-  it("leaves the teacher's own submitted notification alone", async () => {
-    const submissionId = await submit();
-
-    await api(teacher).put(gradePath(submissionId), { value: 5 });
-
-    await expect(itemsOf(teacher)).resolves.toEqual([expect.objectContaining({ kind: 'submitted', submissionId })]);
   });
 
   it('notifies nobody when the row has no account', async () => {
@@ -454,7 +447,7 @@ describe('DELETE /submissions/:id/grade', () => {
     await expect(stored(submissionId)).resolves.toMatchObject({ gradeDenied: false });
   });
 
-  it("removes the student's unread notification but not a read one, nor the teacher's", async () => {
+  it("removes the student's unread notification but not a read one", async () => {
     const [unread, read] = [await submit('one'), await submit('two', student, (await addHomework('text', 'B')).homeworkId)];
     await api(teacher).put(gradePath(unread), { value: 5 });
     await api(teacher).put(gradePath(read), { value: 4 });
@@ -466,7 +459,6 @@ describe('DELETE /submissions/:id/grade', () => {
     await expect(
       Notification.findAll({ where: { userId: student.id }, attributes: ['submissionId'], raw: true }),
     ).resolves.toEqual([{ submissionId: read }]);
-    await expect(Notification.count({ where: { userId: teacher.id, kind: 'submitted' } })).resolves.toBe(2);
   });
 
   it('also removes the unread notice of an account the row was re-linked away from', async () => {

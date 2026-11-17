@@ -18,6 +18,7 @@ import { gradingRouter } from './modules/grading/routes.js';
 import { journalRouter } from './modules/journal/routes.js';
 import { lessonsRouter } from './modules/lessons/routes.js';
 import { notificationsRouter } from './modules/notifications/routes.js';
+import { notify } from './modules/notifications/service.js';
 import { classStudentsRouter, studentRouter } from './modules/students/routes.js';
 import { submissionsRouter } from './modules/submissions/routes.js';
 import { useTestDatabase } from './test/database.js';
@@ -54,9 +55,9 @@ type Send = (user: TestUser | null, f: Fixture) => request.Test;
 
 interface Case {
   // Who may call it at all. 'both': teachers and students, on something of the class.
-  // 'any': teachers and students, each for their own things. 'everyone': the admin too.
-  // 'admin': the admin only.
-  role: 'teacher' | 'student' | 'both' | 'any' | 'everyone' | 'admin';
+  // 'everyone': teachers, students and the admin, each for their own things. 'admin': the
+  // admin only.
+  role: 'teacher' | 'student' | 'both' | 'everyone' | 'admin';
   // The fixture value the access check is about: put a random id there and the rightful
   // caller gets the "doesn't exist" answer that strangers must also get.
   resource?: keyof Fixture;
@@ -335,20 +336,21 @@ const MATRIX: Record<string, Case> = {
     send: (u, f) => call('get', `${V1}/ai-jobs/${f.jobId}`, u),
   },
 
+  // Students only: teachers have no notifications (contract 8.12).
   'GET /api/v1/notifications/count': {
-    role: 'any',
-    ok: [['owner', 200], ['student', 200]],
+    role: 'student',
+    ok: [['student', 200], ['otherStudent', 200]],
     send: (u) => call('get', `${V1}/notifications/count`, u),
   },
   'GET /api/v1/notifications': {
-    role: 'any',
-    ok: [['owner', 200], ['student', 200]],
+    role: 'student',
+    ok: [['student', 200], ['otherStudent', 200]],
     send: (u) => call('get', `${V1}/notifications`, u),
   },
   'POST /api/v1/notifications/:id/read': {
-    role: 'any',
+    role: 'student',
     resource: 'notificationId',
-    ok: [['owner', 204]],
+    ok: [['student', 204]],
     send: (u, f) => call('post', `${V1}/notifications/${f.notificationId}/read`, u),
   },
 
@@ -453,7 +455,8 @@ async function buildFixture(): Promise<Fixture> {
   await api(owner).upload(`/api/v1/lessons/${lessonId}/homework/file?classId=${classId}`, MD, 'task.md');
   const homeworkId = homework.body.homework.id as string;
   const submission = await api(student).post(`/api/v1/homeworks/${homeworkId}/submissions?classId=${classId}`, { text: 'x = 3' });
-  const [notification] = (await api(owner).get('/api/v1/notifications')).body.items;
+  await notify(student.id, submission.body.id, 'graded');
+  const [notification] = (await api(student).get('/api/v1/notifications')).body.items;
   const job = await AiJob.create({
     lessonId,
     classId,
@@ -491,7 +494,6 @@ function strangers(role: Case['role']): Caller[] {
       return ['otherStudent'];
     case 'both':
       return ['otherTeacher', 'otherStudent'];
-    case 'any':
     case 'everyone':
       return ['student', 'otherTeacher', 'otherStudent'];
     case 'admin':
@@ -507,7 +509,6 @@ function wrongRole(role: Case['role']): Caller[] {
     case 'student':
       return ['owner', 'otherTeacher', 'admin'];
     case 'both':
-    case 'any':
       return ['admin'];
     case 'everyone':
       return [];

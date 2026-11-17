@@ -7,6 +7,7 @@ import { orderOutOfRange, writePositions } from '../../lib/positions.js';
 import { insertWithPublicId } from '../../lib/publicId.js';
 import { lockTeacher } from '../categories/service.js';
 import { deleteFileRows, lockLessonFiles, removeStoredFiles } from '../files/service.js';
+import { newSubmissionCountsByClass } from '../submissions/counts.js';
 
 const CLASS_CAP = 100;
 
@@ -21,22 +22,29 @@ export interface ClassDto {
   name: string;
   publicId: string;
   studentCount: number;
-  // Latest versions waiting for a grade; counted from plan Phase 16.
+  // Latest versions waiting for a grade, over every lesson of the class (contract 3).
   newSubmissionCount: number;
   // The other classes of its group; class groups arrive in plan Phase 17.
   linkedClasses: { id: string; name: string }[];
   createdAt: string;
 }
 
-function toClassDto(schoolClass: SchoolClass, studentCount: number): ClassDto {
+interface ClassCounts {
+  studentCount: number;
+  newSubmissionCount: number;
+}
+
+const NO_COUNTS: ClassCounts = { studentCount: 0, newSubmissionCount: 0 };
+
+function toClassDto(schoolClass: SchoolClass, counts: ClassCounts): ClassDto {
   return {
     id: schoolClass.id,
     categoryId: schoolClass.categoryId,
     order: schoolClass.position,
     name: schoolClass.name,
     publicId: schoolClass.publicId,
-    studentCount,
-    newSubmissionCount: 0,
+    studentCount: counts.studentCount,
+    newSubmissionCount: counts.newSubmissionCount,
     linkedClasses: [],
     createdAt: schoolClass.createdAt.toISOString(),
   };
@@ -110,8 +118,22 @@ async function classIdsIn(categoryId: string, transaction: Transaction): Promise
   return classes.map((schoolClass) => schoolClass.id);
 }
 
-async function studentCount(classId: string, transaction?: Transaction): Promise<number> {
-  return ClassStudent.count({ where: { classId }, transaction });
+// Both counts for every class listed, one grouped query each.
+async function countsOf(classIds: string[], transaction?: Transaction): Promise<Map<string, ClassCounts>> {
+  const students = await ClassStudent.count({ where: { classId: classIds }, group: ['classId'], transaction });
+  const studentCounts = new Map(students.map((row) => [String(row.classId), row.count]));
+  const newSubmissions = await newSubmissionCountsByClass(classIds, transaction);
+
+  return new Map(
+    classIds.map((id) => [
+      id,
+      { studentCount: studentCounts.get(id) ?? 0, newSubmissionCount: newSubmissions.get(id) ?? 0 },
+    ]),
+  );
+}
+
+async function countsOfOne(classId: string, transaction?: Transaction): Promise<ClassCounts> {
+  return (await countsOf([classId], transaction)).get(classId) ?? NO_COUNTS;
 }
 
 // Sorted by category order, then class order (contract 8.3).
@@ -134,21 +156,15 @@ export async function listClasses(
     return [];
   }
 
-  const counts = await ClassStudent.count({
-    where: { classId: classes.map((schoolClass) => schoolClass.id) },
-    group: ['classId'],
-  });
-  const studentCounts = new Map(counts.map((row) => [String(row.classId), row.count]));
+  const counts = await countsOf(classes.map((schoolClass) => schoolClass.id));
 
-  return classes.map((schoolClass) =>
-    toClassDto(schoolClass, studentCounts.get(schoolClass.id) ?? 0),
-  );
+  return classes.map((schoolClass) => toClassDto(schoolClass, counts.get(schoolClass.id) ?? NO_COUNTS));
 }
 
 export async function getClass(teacherId: string, classId: string): Promise<ClassDto> {
   const schoolClass = await getOwnClass(teacherId, classId);
 
-  return toClassDto(schoolClass, await studentCount(classId));
+  return toClassDto(schoolClass, await countsOfOne(classId));
 }
 
 // Placed last in its category, with its first unit (contract 8.3).
@@ -178,7 +194,7 @@ export async function createClass(
       const unit = await Unit.create({ classId: schoolClass.id, groupId: null, title: FIRST_UNIT_TITLE }, { transaction });
       await ClassUnit.create({ classId: schoolClass.id, unitId: unit.id, position: 0 }, { transaction });
 
-      return toClassDto(schoolClass, 0);
+      return toClassDto(schoolClass, NO_COUNTS);
     }),
   );
 }
@@ -226,7 +242,7 @@ export async function updateClass(
       await schoolClass.save({ transaction });
     }
 
-    return toClassDto(schoolClass, await studentCount(classId, transaction));
+    return toClassDto(schoolClass, await countsOfOne(classId, transaction));
   });
 }
 
