@@ -366,6 +366,70 @@ describe('units of a group', () => {
   });
 });
 
+// Contract 4.1: a link change or a unit move renumbers the later lessons of every class it
+// touches, not only the class it was made in.
+describe('numbering across a group', () => {
+  const numbers = async (forClass: ClassRef) =>
+    (await outline(forClass)).lessons.map(({ title, number }) => [title, number]);
+
+  it("renumbers the other class's later lessons when a lesson is linked, and again when it is removed there", async () => {
+    const own = await addLesson(a, 'A own');
+    await addLesson(b, 'B own', { unitId: unit2 });
+    expect(await numbers(b)).toEqual([['B own', 1]]);
+
+    await patchLesson(own, a, { linked: true });
+
+    // Hidden in B, but still numbered there (contract 4.1).
+    expect(await numbers(b)).toEqual([
+      ['A own', 1],
+      ['B own', 2],
+    ]);
+
+    expect((await api(teacher).delete(`${lessonPath(own, b)}&scope=class`)).status).toBe(204);
+
+    expect(await numbers(b)).toEqual([['B own', 1]]);
+    expect(await numbers(a)).toEqual([['A own', 1]]);
+  });
+
+  it('renumbers every class when a unit of the group moves', async () => {
+    await addLesson(a, 'A first', { unitId: unit1 });
+    await addLesson(a, 'A second', { unitId: unit2 });
+    await addLesson(b, 'B first', { unitId: unit1 });
+    await addLesson(b, 'B second', { unitId: unit2 });
+
+    expect((await api(teacher).patch(`/api/v1/units/${unit2}?classId=${b.id}`, { order: 0 })).status).toBe(200);
+
+    expect(await numbers(a)).toEqual([
+      ['A second', 1],
+      ['A first', 2],
+    ]);
+    expect(await numbers(b)).toEqual([
+      ['B second', 1],
+      ['B first', 2],
+    ]);
+  });
+});
+
+describe('a lesson removed from one class', () => {
+  it('comes back to it, hidden, when that class leaves the group and joins again (contract 4.1)', async () => {
+    const c = await createClass('7C');
+    expect((await api(teacher).patch(`/api/v1/classes/${a.id}`, { linkedClassIds: [b.id, c.id] })).status).toBe(200);
+    const lessonId = await addLesson(a, 'Shared', { linked: true });
+    expect((await api(teacher).delete(`${lessonPath(lessonId, c)}&scope=class`)).status).toBe(204);
+
+    // Leaving copies only what the class holds, so C takes no copy of it.
+    expect((await api(teacher).patch(`/api/v1/classes/${c.id}`, { linkedClassIds: [] })).status).toBe(200);
+    expect(await titles(c)).toEqual([]);
+    expect(await titles(a)).toEqual(['Shared']);
+
+    expect((await api(teacher).patch(`/api/v1/classes/${a.id}`, { linkedClassIds: [b.id, c.id] })).status).toBe(200);
+
+    expect((await outline(c)).lessons).toEqual([
+      expect.objectContaining({ id: lessonId, title: 'Shared', linked: true, visible: false }),
+    ]);
+  });
+});
+
 describe('caps across a group (contract 2.7)', () => {
   it('gives LIMIT_REACHED naming the class that a linked lesson would push over 500', async () => {
     await fillLessons(b, 500);

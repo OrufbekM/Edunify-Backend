@@ -85,18 +85,23 @@ function columnsFrom(classId: string, outline: ClassOutline, { visibleOnly }: { 
   );
 }
 
-// Each row's latest version of each homework, and the row's average over the graded ones,
-// rounded in SQL as exact numeric (plan, Phase 9). Denied and empty cells don't count.
+// Each row's latest version of each homework in `columns`, and the row's average over the
+// graded ones, rounded in SQL as exact numeric (plan, Phase 9). Denied and empty cells don't
+// count, and neither does homework outside the columns: a student's grades leave hidden
+// lessons out, so their marks must not reach the average either (contract 4.1).
 async function marksOf(
   classStudentIds: string[],
+  columns: Column[],
   transaction: Transaction,
 ): Promise<Map<string, Marks>> {
+  const homeworkIds = columns.map((column) => column.homeworkId);
   const latest = await sequelize.query<Latest>(
     `WITH latest AS (
        SELECT DISTINCT ON (s.class_student_id, s.homework_id)
               s.class_student_id, s.homework_id, s.id, s.status, s.grade_value
          FROM submissions s
         WHERE s.class_student_id = ANY($classStudentIds::uuid[])
+          AND s.homework_id = ANY($homeworkIds::uuid[])
         ORDER BY s.class_student_id, s.homework_id, s.version DESC
      )
      SELECT class_student_id AS "classStudentId",
@@ -107,7 +112,7 @@ async function marksOf(
             round(avg(grade_value) FILTER (WHERE status = 'graded')
                     OVER (PARTITION BY class_student_id), 2)::text AS average
        FROM latest`,
-    { bind: { classStudentIds }, type: QueryTypes.SELECT, transaction },
+    { bind: { classStudentIds, homeworkIds }, type: QueryTypes.SELECT, transaction },
   );
   const marks = new Map<string, Marks>();
 
@@ -163,6 +168,7 @@ export async function getJournal(teacherId: string, classId: string): Promise<Jo
     const roster = await rosterRows(classId, { transaction });
     const marks = await marksOf(
       roster.map((row) => row.id),
+      columns,
       transaction,
     );
 
@@ -196,6 +202,7 @@ export async function listMyGrades(userId: string): Promise<StudentGradesItemDto
     }
     const marks = await marksOf(
       classes.map((item) => item.classStudentId),
+      columns,
       transaction,
     );
 

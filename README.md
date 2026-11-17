@@ -1,6 +1,6 @@
 # Edunify backend
 
-The REST API behind Edunify, a homework platform for schools. Teachers organise classes into lessons, set homework, and grade what students hand in, optionally with suggestions from Claude. Students connect to their classes, submit text, code, drawings or photos, and see their grades.
+The REST API behind Edunify, a homework platform for schools. Teachers organise classes into lessons, set homework, and grade what students hand in, optionally with suggestions from an AI (Claude, Gemini or OpenAI; switched off for now with `AI_GRADING_ENABLED`). Students connect to their classes, submit text, code, drawings or photos, and see their grades.
 
 Built with Node.js 24, Express 5, PostgreSQL 17 and Sequelize. Uploaded files are stored on local disk.
 
@@ -9,7 +9,8 @@ Built with Node.js 24, Express 5, PostgreSQL 17 and Sequelize. Uploaded files ar
 - [Data shapes](#data-shapes)
 - [Endpoints](#endpoints)
 - [A full example](#a-full-example): from an empty class to a grade
-- [Deployment](docs/deploy.md)
+- [Deployment](docs/deploy.md), including the upgrade of a v1 server to v2
+- [The contract](docs/contract.md) with the frontend, which wins wherever this file disagrees, and the [frontend tech spec](docs/techspec.md)
 
 ## Running it locally
 
@@ -511,7 +512,7 @@ Each hand-in is a new version; earlier versions and their grades stay.
 
 ### Journal and grades
 
-Both show only lessons that have homework, as columns in outline order with their `number`, and one cell per lesson from the latest version. The teacher's journal includes hidden lessons; a student's grades leave them out. `average` is the mean of the graded cells, to 2 decimal places; denied and empty cells don't count, and it is `null` when nothing is graded.
+Both show only lessons that have homework, as columns in outline order with their `number`, and one cell per lesson from the latest version. The teacher's journal includes hidden lessons; a student's grades leave them out. `average` is the mean of the graded cells it shows, to 2 decimal places; denied and empty cells don't count, nor do grades on lessons hidden from the student, and it is `null` when nothing is graded.
 
 | Endpoint | Who | What it does |
 |---|---|---|

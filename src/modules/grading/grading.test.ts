@@ -171,6 +171,25 @@ describe('GET /lessons/:lessonId/grading', () => {
     }
   });
 
+  it('still lists and grades a lesson hidden from students (contract 4.1)', async () => {
+    const submissionId = await submit();
+    const hide = await api(teacher).patch(`/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`, { visible: false });
+    expect(hide.status).toBe(200);
+
+    const listed = await api(teacher).get(gradingPath(lessonId));
+    expect(listed.status).toBe(200);
+    expect(listed.body.items).toEqual([
+      expect.objectContaining({ classStudentId: rowId, submission: expect.objectContaining({ id: submissionId }) }),
+    ]);
+
+    const graded = await api(teacher).put(gradePath(submissionId), { value: 4 });
+    expect(graded.status).toBe(200);
+    expect(graded.body).toMatchObject({ status: 'graded', grade: { value: 4 } });
+
+    // The student hears nothing about it while it stays hidden.
+    await expect(itemsOf(student)).resolves.toEqual([]);
+  });
+
   it('gives a lesson without homework the same 404 as a missing lesson', async () => {
     const bare = (await api(teacher).post(`/api/v1/classes/${schoolClass.id}/lessons`, { title: 'Bare', unitId: await firstUnitId(teacher, schoolClass.id) })).body.id;
 

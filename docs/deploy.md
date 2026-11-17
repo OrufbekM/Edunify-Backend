@@ -176,7 +176,67 @@ systemctl restart edunify-backend
 
 A restart cuts off requests in flight, so restart at a quiet time. AI grading jobs that were running go back to the queue when the process starts again, and run from the beginning.
 
-## 8. Check by hand after the first deploy
+## 8. Upgrading a v1 server to v2
+
+Version 2 follows the new contract (`docs/contract.md`): an admin who approves teachers, ordered categories and classes, units in every class, class groups with linked lessons, and lesson numbers. Migrations `018` to `023` rewrite existing tables, so this deploy is not like the others in section 7.
+
+**1. Stop the backend.** The v1 code can't run against the v2 tables, and nothing should write while you back up.
+
+```sh
+systemctl stop edunify-backend
+```
+
+**2. Back up the database and the files** (section 6), and keep this copy until v2 has run for a while:
+
+```sh
+pg_dump -Fc edunify > edunify-before-v2.dump
+cp -a /var/lib/edunify/storage /var/lib/edunify/storage-before-v2
+```
+
+The backup is the only way back. The `down` migrations restore the v1 tables, but not everything in them. For example, the class subject stays merged into the name, deleted teacher notifications don't come back, and group content is dropped.
+
+**3. Update the variables file** (section 2):
+
+- `AI_MODEL` is gone. Rename it to `ANTHROPIC_MODEL`. Without it the process exits on start, because Anthropic is the default provider for both homework types.
+- Add `AI_GRADING_ENABLED=false`. That is also the default when the variable is missing, so AI grading stays off until you turn it on.
+- Optional: `AI_PROVIDER_TEXT`, `AI_PROVIDER_IMAGE`, `AI_FALLBACK_PROVIDER`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GEMINI_MODEL`, `OPENAI_MODEL`, as section 2 describes.
+- Do not put `ADMIN_LOGIN` or `ADMIN_PASSWORD` in this file. They are read only by the seed command in step 5.
+
+**4. Build and migrate**, as in section 3:
+
+```sh
+git pull
+npm ci
+npm run build
+node --env-file=/etc/edunify/backend.env dist/db/migrate.js status   # 018 to 023 pending
+node --env-file=/etc/edunify/backend.env dist/db/migrate.js up
+```
+
+Each migration runs in its own transaction, so one that fails changes nothing and the ones before it stay applied. Fix the cause and run `up` again.
+
+What the migrations do to existing data:
+
+- **Accounts.** Each name is split at its first space into first and last name; a one-word name gets an empty last name. Existing teachers stay `active` (they don't go back for approval), with an empty phone. Both can fill these in from their profile.
+- **Classes.** The subject and name become one name (`subject name`, cut to 80 characters). Categories are ordered by name, and classes newest first within each category, which is the order teachers saw in v1.
+- **Units and lessons.** A class without units gets `Unit 1`. Lessons that had no unit move to the start of the class's first unit. Every lesson stays visible.
+- **Connections.** The `link_audit` table is renamed `connection_audit`, keeping its rows.
+- **Notifications.** Teacher notifications are deleted, because teachers now see `newSubmissionCount` instead. Student notifications stay.
+
+Submissions, grades and files are not changed.
+
+**5. Create the admin account once**, as at the end of section 3 (`dist/db/seedAdmin.js`, with `ADMIN_PASSWORD` read from the prompt). Teachers who sign up from now on wait for this account's approval.
+
+**6. Start it and check it:**
+
+```sh
+systemctl start edunify-backend
+```
+
+Then sign in as a teacher who existed before the upgrade. Check that their categories, classes, students, lessons, submissions and journal grades are all there, and that lesson numbers run 1, 2, 3 through each class. Then do the admin check in section 9, step 3.
+
+To go back: stop the backend, check out the v1 commit and build it, restore the dump with `pg_restore --clean --if-exists -d edunify edunify-before-v2.dump`, put `storage-before-v2` back as `STORAGE_DIR`, restore the old variables file, and start it.
+
+## 9. Check by hand after the first deploy
 
 These depend on a real browser or a real API key, so the automated tests can't cover them:
 

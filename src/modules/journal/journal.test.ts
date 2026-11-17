@@ -367,6 +367,63 @@ describe('GET /student/grades', () => {
     });
   });
 
+  it('leaves out lessons hidden in the class, their marks included, until they are shown again', async () => {
+    const first = await addLesson('First');
+    const hidden = await addLesson('Hidden');
+    const third = await addLesson('Third');
+    await addVersion(hidden.homeworkId, rowId, 1, 2);
+    await addVersion(third.homeworkId, rowId, 1, 5);
+    const show = (visible: boolean) =>
+      api(teacher).patch(`/api/v1/lessons/${hidden.lessonId}?classId=${schoolClass.id}`, { visible });
+    const summary = async () => {
+      const [item] = (await grades()) as Array<{
+        columns: Array<{ title: string; number: number }>;
+        cells: Array<{ lessonId: string }>;
+        average: number | null;
+      }>;
+      return {
+        columns: item?.columns.map((column) => [column.title, column.number]),
+        cells: item?.cells.map((cell) => cell.lessonId),
+        average: item?.average,
+      };
+    };
+
+    await show(false);
+
+    // The 2 on the hidden lesson would make the average 3.5.
+    await expect(summary()).resolves.toEqual({
+      columns: [
+        ['First', 1],
+        ['Third', 3],
+      ],
+      cells: [first.lessonId, third.lessonId],
+      average: 5,
+    });
+    expect((await journal()).rows[0].average).toBe(3.5);
+
+    await show(true);
+
+    await expect(summary()).resolves.toEqual({
+      columns: [
+        ['First', 1],
+        ['Hidden', 2],
+        ['Third', 3],
+      ],
+      cells: [first.lessonId, hidden.lessonId, third.lessonId],
+      average: 3.5,
+    });
+  });
+
+  it('gives a null average when the only grades are on hidden lessons', async () => {
+    const hidden = await addLesson('Hidden');
+    await addVersion(hidden.homeworkId, rowId, 1, 4);
+    await api(teacher).patch(`/api/v1/lessons/${hidden.lessonId}?classId=${schoolClass.id}`, { visible: false });
+
+    const [item] = await grades();
+
+    expect(item).toMatchObject({ columns: [], cells: [], average: null });
+  });
+
   it('drops a class once the row is reconnected to another account', async () => {
     const newAccount = await createTestUser('student');
 
@@ -403,5 +460,40 @@ describe('GET /student/grades', () => {
     expectError(await api(teacher).get('/api/v1/student/grades'), 403, 'FORBIDDEN');
     expectError(await request(app).get('/api/v1/student/grades'), 401, 'UNAUTHENTICATED');
     expectError(await api(student).get('/api/v1/student/grades?classId=x'), 400, 'VALIDATION_ERROR');
+  });
+});
+
+// Contract 4.1: one number per lesson in a class, computed on read by the same outline
+// function everywhere, so no two views can disagree.
+describe('lesson numbers', () => {
+  it('are the same in the outline, the lesson page, the journal and the grades, for the teacher and the student', async () => {
+    const second = await addUnit('Second');
+    const a = await addLesson('A');
+    const b = await addLesson('B', { homework: false });
+    const c = await addLesson('C');
+    const d = await addLesson('D', { unitId: second });
+    const lessonUrl = (lessonId: string) => `/api/v1/lessons/${lessonId}?classId=${schoolClass.id}`;
+    // B, A, C (hidden) in the first unit, then D: 1, 2, 3, 4.
+    expect((await api(teacher).patch(lessonUrl(a.lessonId), { order: 1 })).status).toBe(200);
+    expect((await api(teacher).patch(lessonUrl(c.lessonId), { visible: false })).status).toBe(200);
+    const everyLesson = { [b.lessonId]: 1, [a.lessonId]: 2, [c.lessonId]: 3, [d.lessonId]: 4 };
+    const visible = { [b.lessonId]: 1, [a.lessonId]: 2, [d.lessonId]: 4 };
+    type Numbered = { id?: string; lessonId?: string; number: number };
+    const numbers = (items: Numbered[]) => Object.fromEntries(items.map((item) => [item.id ?? item.lessonId, item.number]));
+    const outlineOf = async (user: TestUser) =>
+      (await api(user).get(`/api/v1/classes/${schoolClass.id}/outline`)).body.lessons as Numbered[];
+    const pageNumbers = async (user: TestUser, lessonIds: string[]) => {
+      const pages = await Promise.all(lessonIds.map((lessonId) => api(user).get(lessonUrl(lessonId))));
+      return Object.fromEntries(pages.map((page, index) => [lessonIds[index], page.body.number]));
+    };
+
+    expect(numbers(await outlineOf(teacher))).toEqual(everyLesson);
+    expect(await pageNumbers(teacher, Object.keys(everyLesson))).toEqual(everyLesson);
+    expect(numbers((await journal()).columns)).toEqual({ [a.lessonId]: 2, [c.lessonId]: 3, [d.lessonId]: 4 });
+
+    expect(numbers(await outlineOf(student))).toEqual(visible);
+    expect(await pageNumbers(student, Object.keys(visible))).toEqual(visible);
+    const [item] = (await grades()) as Array<{ columns: Numbered[] }>;
+    expect(numbers(item?.columns ?? [])).toEqual({ [a.lessonId]: 2, [d.lessonId]: 4 });
   });
 });

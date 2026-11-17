@@ -237,6 +237,8 @@ describe('POST /auth/register', () => {
     ['a teacher phone without +', { role: 'teacher', phone: '998901234567' }, 'phone'],
     ['a teacher phone with too few digits', { role: 'teacher', phone: '+9989012' }, 'phone'],
     ['a teacher phone with letters', { role: 'teacher', phone: '+99890123456a' }, 'phone'],
+    ['a teacher phone starting with +0', { role: 'teacher', phone: '+0998901234567' }, 'phone'],
+    ['a teacher phone with too many digits', { role: 'teacher', phone: '+1234567890123456' }, 'phone'],
     ['a student with a phone', { phone: '+998901234567' }, 'phone'],
   ])('gives VALIDATION_ERROR for %s', async (_name, overrides, path) => {
     const res = await register(overrides);
@@ -250,6 +252,14 @@ describe('POST /auth/register', () => {
 
     expectError(res, 400, 'VALIDATION_ERROR');
     expect(res.body.error.details).toEqual([{ path: 'isAdmin', message: 'Unknown field' }]);
+  });
+
+  it('accepts a teacher phone of exactly 8 and 15 digits', async () => {
+    for (const phone of ['+12345678', '+123456789012345']) {
+      const res = await register({ role: 'teacher', phone });
+      expect(res.status, phone).toBe(201);
+      expect(res.body.user.phone).toBe(phone);
+    }
   });
 
   it('accepts a password of exactly 8 and 128 characters', async () => {
