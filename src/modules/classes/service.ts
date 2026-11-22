@@ -1,0 +1,333 @@
+import { Op, Transaction } from 'sequelize';
+
+import { sequelize } from '../../db/index.js';
+import { Category, ClassStudent, ClassUnit, SchoolClass, Unit } from '../../db/models/index.js';
+import { AppError } from '../../lib/errors.js';
+import { orderOutOfRange, writePositions } from '../../lib/positions.js';
+import { insertWithPublicId } from '../../lib/publicId.js';
+import { lockTeacher } from '../categories/service.js';
+import { deleteFileRows, lockClassFiles, removeStoredFiles } from '../files/service.js';
+import { newSubmissionCountsByClass } from '../submissions/counts.js';
+import { afterMemberDeleted, applyGroupChange, linkedClassesOf, previewGroupChange } from './groups.js';
+import type { GroupPreviewItem } from './groupPlan.js';
+
+const CLASS_CAP = 100;
+
+// Contract 8.3: every new class starts with one unit.
+const FIRST_UNIT_TITLE = 'Unit 1';
+
+// Only teacher routes return this, so a class publicId reaches only its teacher (contract 6.1).
+export interface ClassDto {
+  id: string;
+  categoryId: string;
+  order: number;
+  name: string;
+  publicId: string;
+  studentCount: number;
+  // Latest versions waiting for a grade, over every lesson of the class (contract 3).
+  newSubmissionCount: number;
+  // The other classes of its group, by name; empty when it is in none (contract 3).
+  linkedClasses: { id: string; name: string }[];
+  createdAt: string;
+}
+
+interface ClassCounts {
+  studentCount: number;
+  newSubmissionCount: number;
+}
+
+const NO_COUNTS: ClassCounts = { studentCount: 0, newSubmissionCount: 0 };
+
+function toClassDto(
+  schoolClass: SchoolClass,
+  counts: ClassCounts,
+  linkedClasses: { id: string; name: string }[] = [],
+): ClassDto {
+  return {
+    id: schoolClass.id,
+    categoryId: schoolClass.categoryId,
+    order: schoolClass.position,
+    name: schoolClass.name,
+    publicId: schoolClass.publicId,
+    studentCount: counts.studentCount,
+    newSubmissionCount: counts.newSubmissionCount,
+    linkedClasses,
+    createdAt: schoolClass.createdAt.toISOString(),
+  };
+}
+
+export async function getOwnClass(
+  teacherId: string,
+  classId: string,
+  transaction?: Transaction,
+): Promise<SchoolClass> {
+  const schoolClass = await SchoolClass.findOne({ where: { id: classId, teacherId }, transaction });
+
+  if (!schoolClass) {
+    throw new AppError('NOT_FOUND', 'Class not found');
+  }
+
+  return schoolClass;
+}
+
+// Serializes cap checks per class, the way lockTeacher does per teacher. NO KEY UPDATE,
+// so rows referencing the class can still be inserted elsewhere while it is held.
+export async function lockOwnClass(
+  teacherId: string,
+  classId: string,
+  transaction: Transaction,
+): Promise<SchoolClass> {
+  const schoolClass = await SchoolClass.findOne({
+    where: { id: classId, teacherId },
+    lock: Transaction.LOCK.NO_KEY_UPDATE,
+    transaction,
+  });
+
+  if (!schoolClass) {
+    throw new AppError('NOT_FOUND', 'Class not found');
+  }
+
+  return schoolClass;
+}
+
+// Every write to a class's content holds this (plan, rules: locking): the class, and in a
+// group every class of the group, locked in id order so two writers can't deadlock. Returns
+// the class and the ids of the classes locked, which are the ones a group-wide change
+// reaches. A class that changed group between the two reads is read again.
+export async function lockClassContent(
+  teacherId: string,
+  classId: string,
+  transaction: Transaction,
+): Promise<{ schoolClass: SchoolClass; classIds: string[] }> {
+  for (;;) {
+    const { groupId } = await getOwnClass(teacherId, classId, transaction);
+    const locked = await SchoolClass.findAll({
+      where: groupId ? { [Op.or]: [{ id: classId }, { groupId }] } : { id: classId },
+      order: [['id', 'ASC']],
+      lock: Transaction.LOCK.NO_KEY_UPDATE,
+      transaction,
+    });
+    const schoolClass = locked.find((found) => found.id === classId);
+
+    if (!schoolClass) {
+      throw new AppError('NOT_FOUND', 'Class not found');
+    }
+
+    if (schoolClass.groupId === groupId) {
+      return {
+        schoolClass,
+        classIds: locked.filter((found) => found.id === classId || found.groupId === groupId).map((found) => found.id),
+      };
+    }
+  }
+}
+
+// Someone else's category gets the same answer as one that doesn't exist.
+async function assertOwnCategory(
+  teacherId: string,
+  categoryId: string,
+  transaction?: Transaction,
+): Promise<void> {
+  const category = await Category.findOne({
+    attributes: ['id'],
+    where: { id: categoryId, teacherId },
+    transaction,
+  });
+
+  if (!category) {
+    throw new AppError('VALIDATION_ERROR', 'Unknown category', [
+      { path: 'categoryId', message: 'Unknown category' },
+    ]);
+  }
+}
+
+// The class ids of a category in order.
+async function classIdsIn(categoryId: string, transaction: Transaction): Promise<string[]> {
+  const classes = await SchoolClass.findAll({
+    attributes: ['id'],
+    where: { categoryId },
+    order: [
+      ['position', 'ASC'],
+      ['id', 'ASC'],
+    ],
+    transaction,
+  });
+
+  return classes.map((schoolClass) => schoolClass.id);
+}
+
+// Both counts for every class listed, one grouped query each.
+async function countsOf(classIds: string[], transaction?: Transaction): Promise<Map<string, ClassCounts>> {
+  const students = await ClassStudent.count({ where: { classId: classIds }, group: ['classId'], transaction });
+  const studentCounts = new Map(students.map((row) => [String(row.classId), row.count]));
+  const newSubmissions = await newSubmissionCountsByClass(classIds, transaction);
+
+  return new Map(
+    classIds.map((id) => [
+      id,
+      { studentCount: studentCounts.get(id) ?? 0, newSubmissionCount: newSubmissions.get(id) ?? 0 },
+    ]),
+  );
+}
+
+async function classDto(schoolClass: SchoolClass, transaction?: Transaction): Promise<ClassDto> {
+  const counts = (await countsOf([schoolClass.id], transaction)).get(schoolClass.id) ?? NO_COUNTS;
+  const linked = await linkedClassesOf([schoolClass], transaction);
+
+  return toClassDto(schoolClass, counts, linked.get(schoolClass.id));
+}
+
+// Sorted by category order, then class order (contract 8.3).
+export async function listClasses(
+  teacherId: string,
+  filter: { categoryId?: string },
+): Promise<ClassDto[]> {
+  const classes = await SchoolClass.findAll({
+    where: { teacherId, ...(filter.categoryId ? { categoryId: filter.categoryId } : {}) },
+    include: [{ model: Category, attributes: [], required: true }],
+    order: [
+      [Category, 'position', 'ASC'],
+      ['categoryId', 'ASC'],
+      ['position', 'ASC'],
+      ['id', 'ASC'],
+    ],
+  });
+
+  if (classes.length === 0) {
+    return [];
+  }
+
+  const counts = await countsOf(classes.map((schoolClass) => schoolClass.id));
+  const linked = await linkedClassesOf(classes);
+
+  return classes.map((schoolClass) =>
+    toClassDto(schoolClass, counts.get(schoolClass.id) ?? NO_COUNTS, linked.get(schoolClass.id)),
+  );
+}
+
+export async function getClass(teacherId: string, classId: string): Promise<ClassDto> {
+  return classDto(await getOwnClass(teacherId, classId));
+}
+
+// Placed last in its category, with its first unit (contract 8.3).
+export async function createClass(
+  teacherId: string,
+  input: { categoryId: string; name: string },
+): Promise<ClassDto> {
+  return insertWithPublicId((publicId) =>
+    sequelize.transaction(async (transaction) => {
+      await lockTeacher(teacherId, transaction);
+
+      if ((await SchoolClass.count({ where: { teacherId }, transaction })) >= CLASS_CAP) {
+        throw new AppError('LIMIT_REACHED', `A teacher has at most ${CLASS_CAP} classes`);
+      }
+
+      await assertOwnCategory(teacherId, input.categoryId, transaction);
+      const schoolClass = await SchoolClass.create(
+        {
+          categoryId: input.categoryId,
+          teacherId,
+          name: input.name,
+          position: await SchoolClass.count({ where: { categoryId: input.categoryId }, transaction }),
+          publicId,
+        },
+        { transaction },
+      );
+      const unit = await Unit.create({ classId: schoolClass.id, groupId: null, title: FIRST_UNIT_TITLE }, { transaction });
+      await ClassUnit.create({ classId: schoolClass.id, unitId: unit.id, position: 0 }, { transaction });
+
+      return toClassDto(schoolClass, NO_COUNTS);
+    }),
+  );
+}
+
+// `order` is the class's 0-based index in the category it ends up in: the new one when
+// `categoryId` changes, else its own. A move to another category without `order` puts it
+// last there (contract 8.3). Both categories stay dense. `linkedClassIds` is the whole set
+// of other classes in the group after the save; left out, the group stays as it is.
+export async function updateClass(
+  teacherId: string,
+  classId: string,
+  input: { categoryId?: string; name?: string; order?: number; linkedClassIds?: string[] },
+): Promise<ClassDto> {
+  const { dto, storageKeys } = await sequelize.transaction(async (transaction) => {
+    await lockTeacher(teacherId, transaction);
+    await getOwnClass(teacherId, classId, transaction);
+
+    const fileIds =
+      input.linkedClassIds === undefined
+        ? []
+        : await applyGroupChange(teacherId, classId, input.linkedClassIds, transaction);
+    const schoolClass = await getOwnClass(teacherId, classId, transaction);
+    const from = schoolClass.categoryId;
+    const to = input.categoryId ?? from;
+
+    if (to !== from) {
+      await assertOwnCategory(teacherId, to, transaction);
+    }
+
+    if (input.name !== undefined) {
+      schoolClass.name = input.name;
+    }
+
+    if (to !== from || input.order !== undefined) {
+      const siblings = (await classIdsIn(to, transaction)).filter((id) => id !== classId);
+      const order = input.order ?? siblings.length;
+
+      if (order > siblings.length) {
+        throw orderOutOfRange(siblings.length);
+      }
+
+      schoolClass.categoryId = to;
+      await schoolClass.save({ transaction });
+      await writePositions('classes', [...siblings.slice(0, order), classId, ...siblings.slice(order)], transaction);
+
+      if (to !== from) {
+        await writePositions('classes', await classIdsIn(from, transaction), transaction);
+      }
+
+      await schoolClass.reload({ transaction });
+    } else {
+      await schoolClass.save({ transaction });
+    }
+
+    return { dto: await classDto(schoolClass, transaction), storageKeys: await deleteFileRows(fileIds, transaction) };
+  });
+
+  await removeStoredFiles(storageKeys);
+  return dto;
+}
+
+// POST /classes/:id/linked-classes/preview (contract 8.3).
+export async function previewLinkedClasses(
+  teacherId: string,
+  classId: string,
+  linkedClassIds: string[],
+): Promise<GroupPreviewItem[]> {
+  return previewGroupChange(teacherId, classId, linkedClassIds);
+}
+
+// The database cascades everything in the class; its files go once the transaction has
+// committed. The content lock keeps new lessons out while the files are collected, and the
+// classes after it in its category move up one. In a group the class leaves first, without
+// copies: linked lessons only it held go, and a group left with one class is dissolved
+// (contract 4.1).
+export async function deleteClass(teacherId: string, classId: string): Promise<void> {
+  const storageKeys = await sequelize.transaction(async (transaction) => {
+    await lockTeacher(teacherId, transaction);
+    const { schoolClass } = await lockClassContent(teacherId, classId, transaction);
+    const fileIds = await lockClassFiles(classId, transaction);
+
+    await schoolClass.destroy({ transaction });
+
+    if (schoolClass.groupId) {
+      fileIds.push(...(await afterMemberDeleted(schoolClass.groupId, transaction)));
+    }
+
+    await writePositions('classes', await classIdsIn(schoolClass.categoryId, transaction), transaction);
+
+    return deleteFileRows(fileIds, transaction);
+  });
+
+  await removeStoredFiles(storageKeys);
+}

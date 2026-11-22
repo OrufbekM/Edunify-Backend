@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The versions production runs (contract 1.2): PostgreSQL 17 here, Node 24 from .nvmrc.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: edunify
+          POSTGRES_PASSWORD: edunify
+          POSTGRES_DB: edunify_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U edunify -d edunify_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # vitest.config.ts reads DATABASE_URL from the git-ignored .env.test and sets the rest of
+      # the test environment itself. The test setup migrates this empty database from scratch.
+      - name: Point the tests at the service database
+        run: echo "DATABASE_URL=postgres://edunify:edunify@localhost:5432/edunify_test" > .env.test
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

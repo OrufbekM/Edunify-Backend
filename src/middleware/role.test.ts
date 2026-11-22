@@ -1,0 +1,69 @@
+import express from 'express';
+import request from 'supertest';
+import { describe, expect, it } from 'vitest';
+
+import type { Role } from '../db/models/enums.js';
+import { useTestDatabase } from '../test/database.js';
+import { createTestUser } from '../test/users.js';
+import { requireAuth } from './auth.js';
+import { errorHandler } from './error.js';
+import { requireRole } from './role.js';
+
+function createApp() {
+  const app = express();
+  app.get('/teachers', requireAuth, requireRole('teacher'), (_req, res) => {
+    res.json({ ok: true });
+  });
+  app.get('/everyone', requireAuth, requireRole('teacher', 'student'), (_req, res) => {
+    res.json({ ok: true });
+  });
+  app.get('/no-auth-first', requireRole('teacher'), (_req, res) => {
+    res.json({ ok: true });
+  });
+  app.use(errorHandler);
+  return app;
+}
+
+// requireAuth reads the account from the database (contract 2.3), so the caller is real.
+useTestDatabase();
+
+async function get(path: string, role: Role) {
+  const { token } = await createTestUser(role);
+
+  return request(createApp()).get(path).set('Authorization', `Bearer ${token}`);
+}
+
+describe('requireRole', () => {
+  it('gives 401 UNAUTHENTICATED without req.user', async () => {
+    const res = await request(createApp()).get('/no-auth-first');
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('UNAUTHENTICATED');
+  });
+
+  it('gives 403 FORBIDDEN for the wrong role', async () => {
+    const res = await get('/teachers', 'student');
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: { code: 'FORBIDDEN', message: expect.any(String) } });
+  });
+
+  it('passes for the right role', async () => {
+    const res = await get('/teachers', 'teacher');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('passes for any listed role', async () => {
+    const res = await get('/everyone', 'student');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('keeps the admin out of routes for teachers and students', async () => {
+    const res = await get('/everyone', 'admin');
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+});
