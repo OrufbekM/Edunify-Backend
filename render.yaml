@@ -1,0 +1,59 @@
+# Render Blueprint: the backend as one web service with a persistent disk, plus its PostgreSQL.
+# Create it in the Render dashboard with New > Blueprint and this repository.
+# docs/deploy.md covers the same setup on a plain Linux server.
+
+services:
+  - type: web
+    name: edunify-backend
+    runtime: node # Node 24 from .nvmrc
+    # A disk and the pre-deploy command both need a paid plan.
+    plan: starter
+    # Frankfurt is the region closest to Uzbekistan. The database must be in the same region
+    # for the internal connection URL to work.
+    region: frankfurt
+    branch: main
+    # Deploy only commits whose CI (typecheck, lint, test, build) passed.
+    autoDeployTrigger: checksPass
+    # NODE_ENV=production below would make a plain `npm ci` skip TypeScript, which the build needs.
+    buildCommand: npm ci --include=dev && npm run build
+    # Runs before every new version starts. It applies only migrations that haven't run yet.
+    preDeployCommand: npm run migrate:prod
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    # Uploaded files (STORAGE_DIR). A service with a disk runs exactly one instance, as the
+    # backend requires (in-memory rate limits and the AI worker).
+    disk:
+      name: storage
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: edunify-db
+          property: connectionString
+      # Each generated value is a random 256-bit base64 string (44 characters).
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: FILE_URL_SECRET
+        generateValue: true
+      - key: STORAGE_DIR
+        value: /var/data/storage
+      # AI grading is off for now. The model is still required while anthropic is the provider.
+      - key: AI_GRADING_ENABLED
+        value: "false"
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-5-5
+
+databases:
+  - name: edunify-db
+    plan: basic-256mb
+    region: frankfurt
+    postgresMajorVersion: "17"
+    databaseName: edunify
+    user: edunify
+    # Storage is billed per GB. It can grow later but can't shrink.
+    diskSizeGB: 1
+    # No connections from outside Render. The backend uses the internal URL.
+    ipAllowList: []
