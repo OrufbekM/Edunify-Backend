@@ -79,18 +79,24 @@ function textPart(value: string): PromptPart {
   return { kind: 'text', text: value };
 }
 
+// How the app runs a code answer (the frontend's CodePreview builds the same document).
+const CODE_NOTE =
+  'The student wrote this code in three separate editors: HTML, CSS and JavaScript. The app runs them together as one page: the HTML goes in the body, the CSS in a <style> element in the head, and the JavaScript in a <script> element at the end of the body. The <html>, <css> and <js> tags below only separate the three parts; they are not part of the student\'s code.';
+
 function answerParts(answer: Answer): PromptPart[] {
   switch (answer.type) {
     case 'text':
       return [textPart(tagged('student_answer', answer.text, ' type="text"'))];
     case 'code':
+      // Without this note a model took the <css> and <js> wrappers for the student's own
+      // markup and marked working code down for not using <style> and <script>.
       return [
         textPart(
-          tagged(
+          `${CODE_NOTE}\n\n${tagged(
             'student_answer',
             [tagged('html', answer.html), tagged('css', answer.css), tagged('js', answer.js)].join('\n'),
             ' type="code"',
-          ),
+          )}`,
         ),
       ];
     default:
